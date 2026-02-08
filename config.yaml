@@ -1,0 +1,28 @@
+# Mandali Orchestrator Configuration
+# 5 Personas: Dev, Security, PM, QA, SRE
+
+# Execution settings
+orchestrator:
+  model: "claude-opus-4.5"         # Model for all personas
+
+# Persona definitions
+personas:
+  - id: dev
+    name: "Dev"
+    promptFile: "personas/dev.persona.md"
+
+  - id: security
+    name: "Security"
+    promptFile: "personas/security.persona.md"
+
+  - id: pm
+    name: "PM"
+    promptFile: "personas/pm.persona.md"
+
+  - id: qa
+    name: "QA"
+    promptFile: "personas/qa.persona.md"
+
+  - id: sre
+    name: "SRE"
+    promptFile: "personas/sre.persona.md"

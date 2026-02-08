@@ -1,0 +1,4 @@
+# Mandali Orchestrator Dependencies
+github-copilot-sdk>=0.1.0
+pyyaml>=6.0
+rich>=13.0
