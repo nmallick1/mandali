@@ -435,7 +435,8 @@ async def run_verification(
 2. Check DecisionsTracker for any intentional deviations (these are NOT gaps).
 3. Use your tools to explore the codebase — read actual source files, look for implemented features.
 4. Compare what was planned vs what exists in the code.
-5. Output your verdict as VERIFICATION_RESULT: PASS or VERIFICATION_RESULT: GAPS_FOUND with details.
+5. If DecisionsTracker is empty but the conversation or code shows clear deviations from the plan (e.g., different library versions, changed APIs, added scope, different approaches), flag "Empty DecisionsTracker" as a gap — decisions should have been recorded.
+6. Output your verdict as VERIFICATION_RESULT: PASS or VERIFICATION_RESULT: GAPS_FOUND with details.
 
 Focus on whether the **end goal** was achieved. Implementation creativity is valued — alternative approaches are fine.
 """
@@ -546,6 +547,12 @@ Format: Your message will appear as `[TIME] @{agent.id.upper()}: [your message]`
 - Everyone: "@Team" or "@AllAgents"
 - Respond to "@ORCHESTRATOR" instructions (system messages)
 - Respond to "@HUMAN" messages (human guidance)
+
+# Decision Tracking
+When you make a choice that differs from the plan, or where the plan was silent and you had to decide:
+- Update the decisions file: {workspace.decisions_file}
+- Use the template format already in that file
+- This is as important as conversation — a human will read it to understand what changed and why
 
 # Satisfaction Status
 End EVERY message with one of:
@@ -1634,6 +1641,10 @@ class AutonomousOrchestrator:
         nudge_count = 0  # Track consecutive nudges
         max_nudges = 3  # Escalate to human after 3 nudges
         
+        # Decision tracking nudge state
+        last_phase_check_pos = 0  # Track conversation position for phase detection
+        decisions_mtime = workspace.decisions_file.stat().st_mtime if workspace.decisions_file.exists() else 0
+        
         console.print(Panel(
             "Type a message to interject, Ctrl+C to abort",
             title="📡 MONITORING", border_style="bright_blue"
@@ -1742,6 +1753,34 @@ Nudge {nudge_count}/{max_nudges} before human escalation.
             
             # Update metrics
             self.metrics.total_messages = read_conversation(workspace).count("\n[")
+            
+            # Check for phase completions and nudge PM if DecisionsTracker wasn't updated
+            conversation_content = read_conversation(workspace)
+            new_conversation = conversation_content[last_phase_check_pos:]
+            if new_conversation:
+                phase_completions = re.findall(
+                    r'\[[\d:]+\]\s+@PM:.*?Phase\s+\d+\S*\s+[Cc]omplete',
+                    new_conversation, re.DOTALL
+                )
+                if phase_completions:
+                    last_phase_check_pos = len(conversation_content)
+                    current_mtime = workspace.decisions_file.stat().st_mtime if workspace.decisions_file.exists() else 0
+                    if current_mtime == decisions_mtime:
+                        # DecisionsTracker hasn't been modified since last check
+                        phases_str = f"{len(phase_completions)} phase(s)" if len(phase_completions) > 1 else "a phase"
+                        append_to_conversation(workspace, "ORCHESTRATOR", f"""
+@PM - Completion of {phases_str} detected but DecisionsTracker.md has not been updated.
+
+Before proceeding, verify whether any deviations from the plan occurred during the completed phase(s).
+If choices were made that differ from the plan or where the plan was silent, record them in:
+{workspace.decisions_file}
+
+If no deviations occurred, acknowledge this and proceed.
+""")
+                        log(f"Nudged PM to check DecisionsTracker ({len(phase_completions)} phase(s))", "INFO")
+                    else:
+                        # DecisionsTracker was updated — record the new mtime
+                        decisions_mtime = current_mtime
     
     async def announce_victory(self, workspace: Workspace, is_final: bool = True):
         """Inject victory message. If not final, announce verification pending."""
@@ -2217,8 +2256,9 @@ Once ALL agents confirm readiness, begin design discussion:
 
 After each phase is complete:
 1. @PM updates `_INDEX.md` with: ✅ Complete, commit hash
-2. @PM announces: "@Team Phase X complete, proceeding to Phase Y"
-3. If plan says "STOP after Phase X", team stops and reports to human
+2. @PM verifies `DecisionsTracker.md` has entries for any deviations made during this phase — if choices were made that differ from the plan or where the plan was silent, they must be recorded before moving on
+3. @PM announces: "@Team Phase X complete, proceeding to Phase Y"
+4. If plan says "STOP after Phase X", team stops and reports to human
 
 ---
 
