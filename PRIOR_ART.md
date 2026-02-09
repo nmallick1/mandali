@@ -1,10 +1,10 @@
 # Prior Art & Framework Comparison
 
-This document acknowledges the prior art that influenced our autonomous multi-agent collaboration system and explains how our approach addresses known limitations in existing frameworks.
+This document acknowledges the prior art that influenced Mandali's autonomous multi-agent collaboration system and explains how Mandali's approach addresses known limitations in existing frameworks.
 
 ---
 
-## Our Approach: Autonomous Multi-Agent Collaboration
+## Mandali's Approach: Autonomous Multi-Agent Collaboration
 
 ### Architecture Summary
 
@@ -65,7 +65,7 @@ Named after the Simpsons character, Ralph Wiggum is an iterative autonomous codi
 | No domain specialization | Same agent handles security, testing, architecture |
 | Iteration overhead | May generate excessive attempts for poorly specified tasks |
 
-**How We Address This:**
+**How Mandali Addresses This:**
 - **Multi-agent collaboration** instead of single-agent retry loop
 - **Phase 0B Design Discussion** resolves ambiguity before implementation
 - **Specialized personas** (Security, QA, SRE) catch domain-specific issues
@@ -95,7 +95,7 @@ Created by Steve Yegge, Gas Town is a sophisticated multi-agent workspace manage
 | Centralized Mayor | Single point of coordination can become bottleneck |
 | Infrastructure requirements | Requires careful setup of git worktrees, tmux sessions |
 
-**How We Address This:**
+**How Mandali Addresses This:**
 - **5 personas** is sufficient for most software tasks without resource explosion
 - **Passive orchestrator** - not a "Mayor" directing work, just monitoring/facilitating
 - **Emergent coordination** via @mentions rather than top-down task assignment
@@ -126,7 +126,7 @@ AutoGen is Microsoft's multi-agent conversation framework enabling AI agents to 
 | Security gaps | Basic sandboxing; lacks enterprise governance features |
 | Programmatic patterns | Conversation flows are code-defined, not emergent |
 
-**How We Address This:**
+**How Mandali Addresses This:**
 - **File-based conversation** - natural async dialogue, not programmatic patterns
 - **Agent autonomy** - agents decide when to speak based on @mentions and domain
 - **Built-in observability** - `conversation.txt` is a complete audit log
@@ -157,7 +157,7 @@ CrewAI is an open-source framework for orchestrating role-playing AI agents. Tea
 | Configuration challenges | Tuning agent behaviors for dynamic tasks is difficult |
 | Production gaps | Requires additional tooling for enterprise integration |
 
-**How We Address This:**
+**How Mandali Addresses This:**
 - **Right-sized complexity** - 5 personas match typical software dev team roles
 - **File-based persistence** - conversation and decisions survive restarts
 - **Satisfaction tracking** - explicit state per agent provides auditability
@@ -186,7 +186,7 @@ Software company simulations where AI agents play roles (CEO, PM, Architect, Eng
 | Synchronous only | Chat-chain model; no async collaboration |
 | No real testing | Tests are generated but not executed against real codebase |
 
-**How We Address This:**
+**How Mandali Addresses This:**
 - **Collaborative phases** - agents discuss and iterate, not waterfall handoffs
 - **Real tool execution** - agents run tests, read code, make edits via Copilot CLI
 - **Async communication** - file-based model allows parallel work
@@ -214,7 +214,7 @@ Software company simulations where AI agents play roles (CEO, PM, Architect, Eng
 
 ---
 
-## What Makes Our Approach Unique
+## What Makes Mandali Unique
 
 ### 1. **LLM-Driven Artifact Discovery**
 Default mode skips interview/planning entirely. LLM reads your prompt and plan files, recursively discovers all referenced artifacts (up to 5 levels deep), copies them to workspace, and launches agents. Planning is opt-in via `--generate-plan`, not the default path.
@@ -276,7 +276,7 @@ This system builds on ideas from:
 - **CrewAI** - Role-based specialization and task delegation
 - **MetaGPT/ChatDev** - Software team role modeling
 
-We gratefully acknowledge these projects and their communities for advancing the field of multi-agent AI collaboration.
+Mandali gratefully acknowledges these projects and their communities for advancing the field of multi-agent AI collaboration.
 
 ---
 
