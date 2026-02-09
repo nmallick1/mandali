@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mandali"
+version = "0.1.0"
+description = "Mandali (मंडली) — Autonomous multi-agent collaborative development system using GitHub Copilot SDK"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "nmallick1" },
+]
+keywords = [
+    "multi-agent",
+    "ai-agents",
+    "github-copilot",
+    "copilot-sdk",
+    "code-review",
+    "collaborative-ai",
+    "autonomous-agents",
+    "devtools",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "github-copilot-sdk>=0.1.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nmallick1/mandali"
+Repository = "https://github.com/nmallick1/mandali"
+Issues = "https://github.com/nmallick1/mandali/issues"
+
+[project.scripts]
+mandali = "mandali:main"
+
+[tool.setuptools]
+py-modules = ["mandali"]
+
+[tool.setuptools.package-data]
+"*" = ["personas/*.md", "config.yaml"]
