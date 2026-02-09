@@ -1980,6 +1980,105 @@ def create_restore_point(out_path: Path) -> Optional[str]:
 
 
 # ============================================================================
+# Plan Generation Flow
+# ============================================================================
+
+async def run_generate_plan_flow(orchestrator, prompt: str, out_path: Path) -> Optional[str]:
+    """Run the generate-plan flow: Interview → Generate → Review.
+    
+    Returns plan_content on success, None on failure/rejection.
+    """
+    log("Mode: Generate plan (interview + AI generation)", "INFO")
+    
+    # Step 1: Interview
+    gathered_info = await run_interview(
+        orchestrator.client, orchestrator.model, prompt
+    )
+    
+    if "error" in gathered_info:
+        log(f"Interview failed: {gathered_info['error']}", "ERR")
+        return None
+    
+    # Step 2: Generate plan (creates files in out_path)
+    plan_content = await generate_plan_from_interview(
+        orchestrator.client, orchestrator.model, gathered_info, prompt, out_path
+    )
+    
+    if not plan_content:
+        log("Plan generation failed - no plan files created", "ERR")
+        return None
+    
+    # Determine what was created (phased or single file)
+    phases_path = out_path / "phases"
+    is_phased = (phases_path / "_INDEX.md").exists() or (phases_path / "_CONTEXT.md").exists()
+    
+    if is_phased:
+        plan_location = phases_path
+        phase_count = len(list(phases_path.glob("phase-*.md")))
+        files_list = "\n".join(f"  - {f.name}" for f in sorted(phases_path.glob("*.md")))
+    else:
+        plan_location = out_path / "plan.md"
+        phase_count = 0
+        files_list = "  - plan.md"
+    
+    # Show location, let user review externally
+    detail = f"Location: {plan_location}\n"
+    if is_phased:
+        detail += f"Structure: Phased ({phase_count} phase files)\n"
+    detail += f"\nFiles created:\n{files_list}\n\n"
+    detail += "[dim]Review and modify the files in your editor.[/dim]"
+    console.print(Panel(detail, title="📁 PLAN GENERATED", border_style="green"))
+    
+    while True:
+        choice = Prompt.ask("[bold]Accept or Reject?[/bold]", choices=["a", "r"], default="a").lower()
+        if choice == 'r':
+            log("Plan rejected by user", "WARN")
+            return None
+        elif choice == 'a':
+            # Re-read files in case user edited them
+            if is_phased:
+                content_parts = []
+                ctx = phases_path / "_CONTEXT.md"
+                if ctx.exists():
+                    content_parts.append(f"# === _CONTEXT.md ===\n\n{ctx.read_text(encoding='utf-8')}")
+                idx = phases_path / "_INDEX.md"
+                if idx.exists():
+                    content_parts.append(f"\n\n# === _INDEX.md ===\n\n{idx.read_text(encoding='utf-8')}")
+                for pf in sorted(phases_path.glob("phase-*.md")):
+                    content_parts.append(f"\n\n# === {pf.name} ===\n\n{pf.read_text(encoding='utf-8')}")
+                plan_content = "\n".join(content_parts)
+            else:
+                plan_content = (out_path / "plan.md").read_text(encoding='utf-8')
+            log("Plan accepted by user", "OK")
+            break
+        console.print("[yellow]Please choose A or R[/yellow]")
+    
+    # AI review of generated plan
+    while True:
+        status, result = await review_plan(orchestrator.client, orchestrator.model, plan_content)
+        if status == "approved":
+            log("Plan approved ✅", "OK")
+            break
+        elif status == "needs_clarification":
+            console.print(Panel(escape(result), title="❓ PLAN NEEDS CLARIFICATION", border_style="yellow"))
+            answers = Prompt.ask("Your answers (or 'abort')").strip()
+            if answers.lower() == 'abort':
+                return None
+            plan_content += f"\n\n## Clarifications\n{answers}\n"
+        elif status == "needs_revision":
+            console.print(Panel(
+                escape(result[:2000] + "..." if len(result) > 2000 else result),
+                title="📝 REVISED PLAN", border_style="bright_blue"
+            ))
+            if not Confirm.ask("Use revised plan?", default=True):
+                return None
+            plan_content = result
+            break
+    
+    return plan_content
+
+
+# ============================================================================
 # Main Entry
 # ============================================================================
 
@@ -2007,98 +2106,16 @@ async def async_main(args):
             # ============================================================
             # GENERATE-PLAN MODE: Interview → Generate → Review
             # ============================================================
-            log("Mode: Generate plan (interview + AI generation)", "INFO")
-            
-            # Step 1: Interview
-            gathered_info = await run_interview(
-                orchestrator.client, orchestrator.model, args.prompt
-            )
-            
-            if "error" in gathered_info:
-                log(f"Interview failed: {gathered_info['error']}", "ERR")
+            plan_content = await run_generate_plan_flow(orchestrator, args.prompt, out_path)
+            if plan_content is None:
                 return 1
-            
-            # Step 2: Generate plan (creates files in out_path)
-            plan_content = await generate_plan_from_interview(
-                orchestrator.client, orchestrator.model, gathered_info, args.prompt, out_path
-            )
-            
-            if not plan_content:
-                log("Plan generation failed - no plan files created", "ERR")
-                return 1
-            
-            # Determine what was created (phased or single file)
-            phases_path = out_path / "phases"
-            is_phased = (phases_path / "_INDEX.md").exists() or (phases_path / "_CONTEXT.md").exists()
-            
-            if is_phased:
-                plan_location = phases_path
-                phase_count = len(list(phases_path.glob("phase-*.md")))
-                files_list = "\n".join(f"  - {f.name}" for f in sorted(phases_path.glob("*.md")))
-            else:
-                plan_location = out_path / "plan.md"
-                phase_count = 0
-                files_list = "  - plan.md"
-            
-            # Show location, let user review externally
-            detail = f"Location: {plan_location}\n"
-            if is_phased:
-                detail += f"Structure: Phased ({phase_count} phase files)\n"
-            detail += f"\nFiles created:\n{files_list}\n\n"
-            detail += "[dim]Review and modify the files in your editor.[/dim]"
-            console.print(Panel(detail, title="📁 PLAN GENERATED", border_style="green"))
-            
-            while True:
-                choice = Prompt.ask("[bold]Accept or Reject?[/bold]", choices=["a", "r"], default="a").lower()
-                if choice == 'r':
-                    log("Plan rejected by user", "WARN")
-                    return 0
-                elif choice == 'a':
-                    # Re-read files in case user edited them
-                    if is_phased:
-                        content_parts = []
-                        ctx = phases_path / "_CONTEXT.md"
-                        if ctx.exists():
-                            content_parts.append(f"# === _CONTEXT.md ===\n\n{ctx.read_text(encoding='utf-8')}")
-                        idx = phases_path / "_INDEX.md"
-                        if idx.exists():
-                            content_parts.append(f"\n\n# === _INDEX.md ===\n\n{idx.read_text(encoding='utf-8')}")
-                        for pf in sorted(phases_path.glob("phase-*.md")):
-                            content_parts.append(f"\n\n# === {pf.name} ===\n\n{pf.read_text(encoding='utf-8')}")
-                        plan_content = "\n".join(content_parts)
-                    else:
-                        plan_content = (out_path / "plan.md").read_text(encoding='utf-8')
-                    log("Plan accepted by user", "OK")
-                    break
-                console.print("[yellow]Please choose A or R[/yellow]")
-            
-            # AI review of generated plan
-            while True:
-                status, result = await review_plan(orchestrator.client, orchestrator.model, plan_content)
-                if status == "approved":
-                    log("Plan approved ✅", "OK")
-                    break
-                elif status == "needs_clarification":
-                    console.print(Panel(escape(result), title="❓ PLAN NEEDS CLARIFICATION", border_style="yellow"))
-                    answers = Prompt.ask("Your answers (or 'abort')").strip()
-                    if answers.lower() == 'abort':
-                        return 0
-                    plan_content += f"\n\n## Clarifications\n{answers}\n"
-                elif status == "needs_revision":
-                    console.print(Panel(
-                        escape(result[:2000] + "..." if len(result) > 2000 else result),
-                        title="📝 REVISED PLAN", border_style="bright_blue"
-                    ))
-                    if not Confirm.ask("Use revised plan?", default=True):
-                        return 0
-                    plan_content = result
-                    break
         
         else:
             # ============================================================
             # DEFAULT MODE: Discover existing artifacts, skip planning
             # ============================================================
             log("Mode: Direct launch (discovering existing plan artifacts)", "INFO")
+            plan_content = None
             
             if args.prompt:
                 # Extract file paths from prompt using LLM
@@ -2106,9 +2123,14 @@ async def async_main(args):
                     orchestrator.client, orchestrator.model, args.prompt
                 )
                 if not initial_paths:
-                    log("No file references found in prompt", "ERR")
-                    log("Use --generate-plan to create a plan from scratch", "INFO")
-                    return 1
+                    log("No file references found in prompt", "WARN")
+                    if Confirm.ask("[yellow]Would you like to generate a plan from this prompt instead?[/yellow]"):
+                        plan_content = await run_generate_plan_flow(orchestrator, args.prompt, out_path)
+                        if plan_content is None:
+                            return 1
+                    else:
+                        log("Use --generate-plan to create a plan from scratch", "INFO")
+                        return 1
             else:
                 # --plan provided: start from the plan file
                 plan_path = Path(args.plan)
@@ -2120,66 +2142,78 @@ async def async_main(args):
                 if plan_path.name in ('_INDEX.md', '_CONTEXT.md'):
                     initial_paths = [plan_path.parent.resolve()]
             
-            # Recursively discover all referenced artifacts (up to 5 levels)
-            artifacts = await discover_plan_artifacts(
-                orchestrator.client, orchestrator.model, initial_paths
-            )
+            # Only discover/copy artifacts if we didn't switch to generate-plan
+            if plan_content is None:
+                # Recursively discover all referenced artifacts (up to 5 levels)
+                artifacts = await discover_plan_artifacts(
+                    orchestrator.client, orchestrator.model, initial_paths
+                )
+                
+                if not artifacts:
+                    log("No plan artifacts found", "WARN")
+                    if args.prompt and Confirm.ask("[yellow]Would you like to generate a plan from this prompt instead?[/yellow]"):
+                        plan_content = await run_generate_plan_flow(orchestrator, args.prompt, out_path)
+                        if plan_content is None:
+                            return 1
+                    else:
+                        if not args.prompt:
+                            log("Provide a --prompt to generate a plan from scratch", "INFO")
+                        else:
+                            log("Use --generate-plan to create a plan from scratch", "INFO")
+                        return 1
             
-            if not artifacts:
-                log("No plan artifacts found", "ERR")
-                log("Use --generate-plan to create a plan from scratch", "INFO")
-                return 1
+            # Only show artifact UI if we discovered artifacts (not generated a plan)
+            if plan_content is None:
+                # Copy artifacts to workspace
+                workspace = Workspace.create(out_path)
+                workspace.ensure_exists()
+                copied = copy_plan_artifacts(artifacts, workspace)
             
-            # Copy artifacts to workspace
-            workspace = Workspace.create(out_path)
-            workspace.ensure_exists()
-            copied = copy_plan_artifacts(artifacts, workspace)
-            
-            # Show confirmation UI
-            def format_size(size_bytes: int) -> str:
-                if size_bytes < 1024:
-                    return f"{size_bytes} B"
-                return f"{size_bytes / 1024:.1f} KB"
-            
-            files_table = Table(show_header=True, header_style="bold", box=None)
-            files_table.add_column("File", style="cyan")
-            files_table.add_column("Size", justify="right", style="dim")
-            for src, dst, size in copied:
-                files_table.add_row(str(dst.relative_to(out_path)), format_size(size))
-            
-            detail_parts = [f"Workspace: {out_path}\n"]
-            if prompt_context:
-                preview = prompt_context[:80] + "..." if len(prompt_context) > 80 else prompt_context
-                detail_parts.append(f'Prompt: "{escape(preview)}"')
-            
-            console.print(Panel(
-                "\n".join(detail_parts),
-                title="📁 PLAN ARTIFACTS DISCOVERED", border_style="green"
-            ))
-            console.print(files_table)
-            console.print("\n[dim]Review the workspace. Press Accept to launch agents, or Reject.[/dim]")
-            
-            while True:
-                choice = Prompt.ask("[bold]Accept or Reject?[/bold]", choices=["a", "r"], default="a").lower()
-                if choice == 'r':
-                    log("Launch rejected by user", "WARN")
-                    return 0
-                elif choice == 'a':
-                    log("Artifacts accepted, preparing to launch", "OK")
-                    break
-                console.print("[yellow]Please choose A or R[/yellow]")
-            
-            # Build plan_content from workspace
-            plan_content = workspace.get_plan_content()
-            if not plan_content:
-                # Fallback: concatenate all copied files
-                parts = []
-                for src, dst, _ in copied:
-                    try:
-                        parts.append(f"# === {dst.name} ===\n\n{dst.read_text(encoding='utf-8')}")
-                    except (UnicodeDecodeError, IOError):
-                        pass
-                plan_content = "\n\n".join(parts)
+                # Show confirmation UI
+                def format_size(size_bytes: int) -> str:
+                    if size_bytes < 1024:
+                        return f"{size_bytes} B"
+                    return f"{size_bytes / 1024:.1f} KB"
+                
+                files_table = Table(show_header=True, header_style="bold", box=None)
+                files_table.add_column("File", style="cyan")
+                files_table.add_column("Size", justify="right", style="dim")
+                for src, dst, size in copied:
+                    files_table.add_row(str(dst.relative_to(out_path)), format_size(size))
+                
+                detail_parts = [f"Workspace: {out_path}\n"]
+                if prompt_context:
+                    preview = prompt_context[:80] + "..." if len(prompt_context) > 80 else prompt_context
+                    detail_parts.append(f'Prompt: "{escape(preview)}"')
+                
+                console.print(Panel(
+                    "\n".join(detail_parts),
+                    title="📁 PLAN ARTIFACTS DISCOVERED", border_style="green"
+                ))
+                console.print(files_table)
+                console.print("\n[dim]Review the workspace. Press Accept to launch agents, or Reject.[/dim]")
+                
+                while True:
+                    choice = Prompt.ask("[bold]Accept or Reject?[/bold]", choices=["a", "r"], default="a").lower()
+                    if choice == 'r':
+                        log("Launch rejected by user", "WARN")
+                        return 0
+                    elif choice == 'a':
+                        log("Artifacts accepted, preparing to launch", "OK")
+                        break
+                    console.print("[yellow]Please choose A or R[/yellow]")
+                
+                # Build plan_content from workspace
+                plan_content = workspace.get_plan_content()
+                if not plan_content:
+                    # Fallback: concatenate all copied files
+                    parts = []
+                    for src, dst, _ in copied:
+                        try:
+                            parts.append(f"# === {dst.name} ===\n\n{dst.read_text(encoding='utf-8')}")
+                        except (UnicodeDecodeError, IOError):
+                            pass
+                    plan_content = "\n\n".join(parts)
         
         # ============================================================
         # COMMON: Setup workspace and launch agents
