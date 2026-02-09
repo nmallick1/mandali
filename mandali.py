@@ -1598,6 +1598,7 @@ class AutonomousOrchestrator:
                         char = msvcrt.getwch()
                         if char == '\r' or char == '\n':
                             print()  # newline
+                            line = line.strip()
                             return line if line else None
                         elif char == '\x08':  # backspace
                             if line:
@@ -1606,6 +1607,9 @@ class AutonomousOrchestrator:
                         elif char == '\x1b':  # Escape - cancel input
                             print(" (cancelled)")
                             return None
+                        elif char in ('\x00', '\xe0'):  # Special key prefix (arrows, function keys) - consume scan code
+                            if msvcrt.kbhit():
+                                msvcrt.getwch()  # discard scan code
                         else:
                             line += char
                             print(char, end='', flush=True)
@@ -1614,6 +1618,7 @@ class AutonomousOrchestrator:
                         timeout_counter += 1
                 
                 # Timeout - return what we have
+                line = line.strip()
                 if line:
                     print()
                     return line
