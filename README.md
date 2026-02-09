@@ -4,6 +4,27 @@
 
 Autonomous multi-agent collaborative development system using GitHub Copilot SDK
 
+## Prerequisites
+
+Before using Mandali, ensure the following are installed:
+
+| Requirement | How to install |
+|-------------|---------------|
+| **Python 3.10+** | [python.org](https://www.python.org/downloads/) |
+| **Node.js 18+** | [nodejs.org](https://nodejs.org/) (required for Copilot CLI) |
+| **GitHub Copilot CLI** | `npm install -g @anthropic-ai/copilot` |
+| **GitHub Copilot license** | Active Copilot Individual, Business, or Enterprise subscription |
+
+**Verify your setup:**
+```bash
+python --version      # 3.10 or higher
+copilot --version     # Should print the CLI version
+```
+
+> **Tip:** If the CLI is installed but not in your PATH, set the `COPILOT_CLI_PATH` environment variable to point directly at the binary.
+
+---
+
 ## Quick Start
 
 ```bash

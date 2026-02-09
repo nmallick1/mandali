@@ -44,18 +44,20 @@ def get_copilot_cli_path() -> str:
     """
     Discover the copilot CLI path, handling Windows specifics.
     On Windows, we need to use the .cmd wrapper or the node loader directly.
+    Exits with clear instructions if the CLI is not found.
     """
     # Check environment variable first
     if env_path := os.environ.get("COPILOT_CLI_PATH"):
-        return env_path
+        if os.path.isfile(env_path) or shutil.which(env_path):
+            return env_path
+        log(f"COPILOT_CLI_PATH is set to '{env_path}' but it was not found.", "ERROR")
+        sys.exit(1)
     
     # Try to find copilot in PATH
     if sys.platform == "win32":
-        # On Windows, look for copilot.cmd
         copilot_cmd = shutil.which("copilot.cmd")
         if copilot_cmd:
             return copilot_cmd
-        # Also try without extension - shutil.which handles PATHEXT
         copilot_exe = shutil.which("copilot")
         if copilot_exe:
             return copilot_exe
@@ -64,8 +66,23 @@ def get_copilot_cli_path() -> str:
         if copilot_path:
             return copilot_path
     
-    # Fallback to default (will likely fail, but let SDK handle it)
-    return "copilot"
+    # Not found — give clear instructions
+    log("GitHub Copilot CLI not found in PATH.", "ERROR")
+    console.print(Panel(
+        "[bold]GitHub Copilot CLI is required but was not found.[/bold]\n\n"
+        "Install it with:\n"
+        "  [cyan]npm install -g @anthropic-ai/copilot[/cyan]\n\n"
+        "Or set the path manually:\n"
+        "  [cyan]export COPILOT_CLI_PATH=/path/to/copilot[/cyan]  (Linux/macOS)\n"
+        "  [cyan]set COPILOT_CLI_PATH=C:\\path\\to\\copilot.cmd[/cyan]  (Windows)\n\n"
+        "After installing, verify with:\n"
+        "  [cyan]copilot --version[/cyan]\n\n"
+        "For more info: [link]https://github.com/nmallick1/mandali#prerequisites[/link]",
+        title="⚠️  Missing Prerequisite",
+        border_style="yellow",
+    ))
+    sys.exit(1)
+
 
 # ============================================================================
 # Configuration
