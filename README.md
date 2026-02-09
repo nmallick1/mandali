@@ -353,12 +353,6 @@ Agents acknowledge, update status to WORKING/SATISFIED, and continue.
 
 ---
 
-## File Locking
-
-The orchestrator writes to `conversation.txt` on behalf of all agents (agents read directly but never write). This eliminates concurrent-write race conditions. On Windows, writes are protected with `msvcrt.locking`; on Unix, `fcntl.flock` is used.
-
----
-
 ## Prior Art Acknowledgment
 
 This system implements the **multi-agent collaborative development pattern**, which is an established approach in AI research. Key prior art includes:
@@ -477,6 +471,20 @@ This system builds on ideas from several multi-agent frameworks:
 | **MetaGPT/ChatDev** | Software team role modeling |
 
 See **[PRIOR_ART.md](./PRIOR_ART.md)** for detailed comparison, limitations of existing frameworks, and how our approach addresses them.
+
+---
+
+## What's Next
+
+### 🔮 Emulate Me Mode
+
+What if the agents didn't just play generic roles — but played *you*?
+
+Mandali can already orchestrate five specialists. The next step: teach them how *you* think. Your code review instincts. Your bias toward simplicity or thoroughness. The concerns you always raise. The ones you never do.
+
+One command. Autonomous agents. Your voice!
+
+*Coming soon: `--as-me`*
 
 ---
 
