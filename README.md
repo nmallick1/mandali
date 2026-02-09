@@ -14,7 +14,7 @@ pip install github-copilot-sdk pyyaml rich
 python mandali.py --plan phases/_INDEX.md --out-path ./output
 
 # Default: Prompt with references to existing plan files
-python mandali.py --prompt "Resume reimplementation. Read phases/_CONTEXT.md and AI_INVESTIGATION_PLAN.md. Complete phases AI-1 through AI-7. Stop after AI-7." --out-path ./Diagnostics.RuntimeHost
+python mandali.py --prompt "Resume reimplementation. Read phases/_CONTEXT.md and AI_INVESTIGATION_PLAN.md. Complete phases AI-1 through AI-7. Stop after AI-7." --out-path ./my-project
 
 # Opt-in: Generate a NEW plan from scratch via interview
 python mandali.py --prompt "Add caching to the API layer" --generate-plan --out-path ./output
@@ -176,7 +176,7 @@ python mandali.py --plan ./phases/_INDEX.md --out-path ./output
 The LLM extracts file/folder paths mentioned in your prompt, reads those files, recursively discovers any files they reference (up to 5 levels), copies everything to the workspace, and launches agents. Your prompt is passed as additional context alongside the plan.
 
 ```bash
-python mandali.py --prompt "Resume reimplementation. Read phases/_CONTEXT.md and AI_INVESTIGATION_PLAN.md. Start from AI-1, stop after AI-7." --out-path ./Diagnostics.RuntimeHost
+python mandali.py --prompt "Resume reimplementation. Read phases/_CONTEXT.md and AI_INVESTIGATION_PLAN.md. Start from AI-1, stop after AI-7." --out-path ./my-project
 ```
 
 **What happens:**
