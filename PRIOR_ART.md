@@ -196,7 +196,7 @@ Software company simulations where AI agents play roles (CEO, PM, Architect, Eng
 
 ## Comparison Matrix
 
-| Feature | Ralph Wiggum | Gas Town | AutoGen | CrewAI | MetaGPT | **Ours** |
+| Feature | Ralph Wiggum | Gas Town | AutoGen | CrewAI | MetaGPT | **Mandali** |
 |---------|-------------|----------|---------|--------|---------|----------|
 | Multi-agent | ❌ Single | ✅ 20-30+ | ✅ GroupChat | ✅ Crews | ✅ Roles | ✅ 5 Personas |
 | Real tooling | ✅ | ✅ | ⚠️ Sandboxed | ❌ Simulated | ❌ Simulated | ✅ Copilot CLI + MCP + Skills |
