@@ -7,7 +7,7 @@ Orchestrator is a passive monitor, not an active driver.
 
 Usage:
   python mandali.py --plan path/to/plan.md --out-path ./output
-  python mandali.py --prompt "Resume reimplementation, read phases/ and AI_PLAN.md" --out-path ./output
+  python mandali.py --prompt "Read phases/_CONTEXT.md and phases/_INDEX.md. Complete all phases." --out-path ./output
   python mandali.py --prompt "Build a feature" --generate-plan --out-path ./output
 
 Requirements:
@@ -1142,7 +1142,7 @@ async def extract_plan_paths(client: CopilotClient, model: str, prompt: str) -> 
         "system_message": (
             "You extract file and folder paths from text. "
             "Return ONLY a JSON array of strings. No explanation, no markdown fencing. "
-            "Example: [\"phases/_INDEX.md\", \"AI_INVESTIGATION_PLAN.md\", \"src/Services/\"]"
+            "Example: [\"phases/_INDEX.md\", \"docs/architecture.md\", \"src/Services/\"]"
         )
     })
     

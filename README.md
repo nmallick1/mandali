@@ -14,7 +14,7 @@ pip install github-copilot-sdk pyyaml rich
 python mandali.py --plan phases/_INDEX.md --out-path ./output
 
 # Default: Prompt with references to existing plan files
-python mandali.py --prompt "Resume reimplementation. Read phases/_CONTEXT.md and AI_INVESTIGATION_PLAN.md. Complete phases AI-1 through AI-7. Stop after AI-7." --out-path ./my-project
+python mandali.py --prompt "Read phases/_CONTEXT.md and phases/_INDEX.md. Complete all phases." --out-path ./my-project
 
 # Opt-in: Generate a NEW plan from scratch via interview
 python mandali.py --prompt "Add caching to the API layer" --generate-plan --out-path ./output
@@ -128,7 +128,7 @@ python mandali.py [OPTIONS]
 python mandali.py --plan ./phases/_INDEX.md --out-path ./output
 
 # Direct launch with prompt referencing existing files
-python mandali.py --prompt "Read phases/_CONTEXT.md and AI_INVESTIGATION_PLAN.md. Complete AI-1 through AI-7. Stop after AI-7." --out-path ./output
+python mandali.py --prompt "Read phases/_CONTEXT.md and phases/_INDEX.md. Complete all phases." --out-path ./output
 
 # Generate a NEW plan from scratch (opt-in)
 python mandali.py --prompt "Add Redis caching for API responses" --generate-plan --out-path ./output/redis-caching
@@ -176,11 +176,11 @@ python mandali.py --plan ./phases/_INDEX.md --out-path ./output
 The LLM extracts file/folder paths mentioned in your prompt, reads those files, recursively discovers any files they reference (up to 5 levels), copies everything to the workspace, and launches agents. Your prompt is passed as additional context alongside the plan.
 
 ```bash
-python mandali.py --prompt "Resume reimplementation. Read phases/_CONTEXT.md and AI_INVESTIGATION_PLAN.md. Start from AI-1, stop after AI-7." --out-path ./my-project
+python mandali.py --prompt "Read phases/_CONTEXT.md and phases/_INDEX.md. Start from Phase 3." --out-path ./my-project
 ```
 
 **What happens:**
-1. 🔍 LLM extracts paths: `phases/_CONTEXT.md`, `AI_INVESTIGATION_PLAN.md`
+1. 🔍 LLM extracts paths: `phases/_CONTEXT.md`, `phases/_INDEX.md`
 2. 🔍 Reads those files, discovers nested references (depth 1/5, 2/5, ...)
 3. 📁 Copies all artifacts to workspace
 4. ✅ Shows you what was found — you confirm or reject
@@ -189,8 +189,8 @@ python mandali.py --prompt "Resume reimplementation. Read phases/_CONTEXT.md and
 #### Prompt Tips
 
 Reference your plan files explicitly in the prompt:
-- ✅ `"Read phases/_CONTEXT.md and phases/_INDEX.md. Complete AI-1 through AI-7."`
-- ✅ `"Follow the plan in AI_INVESTIGATION_PLAN.md. Start from Phase 3."`
+- ✅ `"Read phases/_CONTEXT.md and phases/_INDEX.md. Complete all phases."`
+- ✅ `"Follow the plan in phases/_INDEX.md. Start from Phase 3."`
 - ❌ `"Continue the implementation"` (no file references — orchestrator won't find plan files)
 
 ### Opt-in: Plan Generation (`--generate-plan`)
