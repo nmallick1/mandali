@@ -71,7 +71,8 @@ def get_copilot_cli_path() -> str:
     console.print(Panel(
         "[bold]GitHub Copilot CLI is required but was not found.[/bold]\n\n"
         "Install it with:\n"
-        "  [cyan]npm install -g @anthropic-ai/copilot[/cyan]\n\n"
+        "  [cyan]winget install GitHub.Copilot[/cyan]  (Windows)\n"
+        "  [cyan]npm install -g @github/copilot[/cyan]  (any platform)\n\n"
         "Or set the path manually:\n"
         "  [cyan]export COPILOT_CLI_PATH=/path/to/copilot[/cyan]  (Linux/macOS)\n"
         "  [cyan]set COPILOT_CLI_PATH=C:\\path\\to\\copilot.cmd[/cyan]  (Windows)\n\n"

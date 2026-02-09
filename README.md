@@ -12,7 +12,7 @@ Before using Mandali, ensure the following are installed:
 |-------------|---------------|
 | **Python 3.10+** | [python.org](https://www.python.org/downloads/) |
 | **Node.js 18+** | [nodejs.org](https://nodejs.org/) (required for Copilot CLI) |
-| **GitHub Copilot CLI** | `npm install -g @anthropic-ai/copilot` |
+| **GitHub Copilot CLI** | `winget install GitHub.Copilot` or `npm install -g @github/copilot` |
 | **GitHub Copilot license** | Active Copilot Individual, Business, or Enterprise subscription |
 
 **Verify your setup:**
