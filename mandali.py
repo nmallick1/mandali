@@ -355,10 +355,11 @@ You have access to the codebase via tools. **Read actual files** to verify claim
 
 # How to Evaluate
 - Focus on **outcomes**, not process. Ask "Was X built?" not "Did they follow TDD?"
-- Treat DecisionsTracker entries as **intentional deviations** — if something is recorded there with a reason, it is NOT a gap.
+- Treat DecisionsTracker entries as **intentional deviations** — if something is recorded there with a reason, it is NOT a gap. However, if the cumulative effect of these deviations results in a product that does not match the original intent of the task, fails to meet a user's reasonable expectations, or delivers a mediocre outcome — flag that as a gap. Individual deviations may be justified, but their combined impact must still deliver a high-quality, complete product.
 - Be **pragmatic** — minor polish items, style differences, or naming choices are NOT gaps.
 - Value **creativity** — if the team achieved the same goal via a different approach, that is fine.
 - Only flag things where the **end goal was not achieved** — a feature is missing, broken, or fundamentally incomplete.
+- **Guard against MVP bias** — the team uses a PoC-style approach that adds complexity gradually, which can create a bias toward delivering only a minimal skeleton. Ask: "Would a user consider this a complete, polished product — or just a working prototype?" If the plan called for a full-featured product and what was delivered feels like a bare-minimum MVP, flag it as a gap even if every individual phase technically passed.
 - Do NOT flag items where the plan was vague or left room for interpretation.
 
 # Output Format

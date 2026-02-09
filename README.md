@@ -1,6 +1,6 @@
 # Mandali
 
-> *Mandali (मंडली) — Hindi: a circle of specialists that deliberates and acts together*
+> *Mandali (मंडली, pronounced "mun-da-lee") — Sanskrit: a circle of specialists that deliberates and acts together*
 
 Autonomous multi-agent collaborative development system using GitHub Copilot SDK
 
