@@ -179,7 +179,7 @@ All must be true:
 - [ ] Test strategy agreed during design
 - [ ] Unit tests exist (>70% coverage on new code)
 - [ ] Integration tests exist and pass
-- [ ] **Application starts and responds** — you have run the app and verified at least one real endpoint returns expected data
+- [ ] **Application starts and responds** — you have run the app and verified multiple distinct flows including cross-feature interactions (not just one endpoint)
 - [ ] E2E happy path works
 - [ ] User journey makes sense
 - [ ] Edge cases tested

@@ -88,6 +88,8 @@ The team uses a PHASED FILE STRUCTURE for large projects:
 ### Phase Transitions:
 - After each phase, update `_INDEX.md` with: ✅ Complete, commit hash
 - **Check DecisionsTracker.md** — verify it has entries for any deviations made during this phase. If the phase involved choices not in the plan and no decisions were recorded, ask the responsible agent to add them before moving on.
+- **Require cross-feature testing** — before accepting any phase that adds new behavior, ask @QA to confirm they tested input combinations that cross feature boundaries (e.g., new feature interacting with features from prior phases), not just the happy path for the new feature in isolation.
+- **Before final acceptance** — require @QA to report exploratory testing they performed against the running application beyond scripted/automated tests. If @QA only ran automated tests and verified screenshots, push back and ask for unscripted exploratory scenarios.
 - Announce: "@Team Phase X complete, proceeding to Phase Y"
 - If plan says "STOP after Phase X", enforce that stopping point
 
