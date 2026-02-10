@@ -1971,12 +1971,14 @@ def setup_worktree(out_path: Path) -> WorktreeResult:
                 sys.exit(1)
         
         # Stash pending changes before creating worktree
+        has_pending = False
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=git_root, capture_output=True, text=True, check=True
         )
         
         if status.stdout.strip():
+            has_pending = True
             stash_msg = "mandali: pre-agent user changes"
             stash_result = subprocess.run(
                 ["git", "stash", "push", "-u", "-m", stash_msg],
@@ -1985,12 +1987,36 @@ def setup_worktree(out_path: Path) -> WorktreeResult:
             if "No local changes" not in stash_result.stdout:
                 result.stash_ref = "stash@{0}"
                 log(f"Stashed pending changes: {result.stash_ref}", "INFO")
+            else:
+                has_pending = False
         
         # Create branch and worktree
         subprocess.run(
             ["git", "worktree", "add", "-b", branch_name, str(worktree_dir)],
             cwd=git_root, capture_output=True, text=True, check=True
         )
+        
+        # Apply stashed changes to worktree so agents pick up where user left off
+        if has_pending and result.stash_ref:
+            apply_result = subprocess.run(
+                ["git", "stash", "apply"],
+                cwd=worktree_dir, capture_output=True, text=True
+            )
+            if apply_result.returncode == 0:
+                log("Applied pending changes to worktree", "OK")
+            else:
+                log("Could not apply pending changes to worktree (continuing without them)", "WARN")
+            
+            # Restore original directory to its pre-stash state
+            pop_result = subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=git_root, capture_output=True, text=True
+            )
+            if pop_result.returncode == 0:
+                log("Restored pending changes in original directory", "OK")
+                result.stash_ref = ""  # Stash consumed
+            else:
+                log("Could not restore stash in original directory (stash preserved)", "WARN")
         
         result.out_path = worktree_dir
         result.created = True
@@ -2000,8 +2026,8 @@ def setup_worktree(out_path: Path) -> WorktreeResult:
         panel_text = f"Original:  {git_root}\n"
         panel_text += f"Worktree:  {worktree_dir}\n"
         panel_text += f"Branch:    {branch_name}\n"
-        if result.stash_ref:
-            panel_text += f"Stash:     {result.stash_ref} (your pending changes)\n"
+        if has_pending:
+            panel_text += f"Pending changes: carried over to worktree\n"
         panel_text += f"\nYour original directory is untouched."
         console.print(Panel(panel_text, title="🔒 WORKTREE ISOLATION", border_style="bright_blue"))
         
