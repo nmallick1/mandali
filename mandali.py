@@ -42,6 +42,11 @@ console = Console()
 from copilot import CopilotClient
 
 __version__ = "0.1.0"
+try:
+    from importlib.metadata import version as _pkg_version
+    __version__ = _pkg_version("mandali")
+except Exception:
+    pass  # Not installed as package — use hardcoded fallback
 GITHUB_REPO = "nmallick1/mandali"
 
 
@@ -59,9 +64,10 @@ def _check_for_updates():
         
         remote_version = match.group(1)
         if remote_version != __version__:
-            console.print(
-                f"[dim]Update available: {__version__} → {remote_version}. "
-                f"Run: pip install --upgrade git+https://github.com/{GITHUB_REPO}.git[/dim]"
+            # Use print() — not console.print() — to avoid Rich thread-safety issues
+            print(
+                f"  Update available: {__version__} → {remote_version}. "
+                f"Run: pip install --upgrade git+https://github.com/{GITHUB_REPO}.git"
             )
     except Exception:
         pass  # Network issues, rate limits — silently ignore
@@ -2075,10 +2081,18 @@ def setup_worktree(out_path: Path) -> WorktreeResult:
     except subprocess.CalledProcessError as e:
         log(f"Git worktree setup failed: {e.stderr or e}", "WARN")
         log("Falling back to working directly in --out-path (no isolation)", "WARN")
+        if result.stash_ref and result.git_root:
+            subprocess.run(["git", "stash", "pop"], cwd=result.git_root, capture_output=True, text=True)
+            log("Restored stashed changes", "OK")
+            result.stash_ref = ""
         return result
     except Exception as e:
         log(f"Worktree setup error: {e}", "WARN")
         log("Falling back to working directly in --out-path (no isolation)", "WARN")
+        if result.stash_ref and result.git_root:
+            subprocess.run(["git", "stash", "pop"], cwd=result.git_root, capture_output=True, text=True)
+            log("Restored stashed changes", "OK")
+            result.stash_ref = ""
         return result
 
 
