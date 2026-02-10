@@ -1996,7 +1996,13 @@ def setup_worktree(out_path: Path) -> WorktreeResult:
             cwd=git_root, capture_output=True, text=True, check=True
         )
         
+        # Mark as created immediately so cleanup works if anything below fails
+        result.out_path = worktree_dir
+        result.created = True
+        result.branch_name = branch_name
+        
         # Apply stashed changes to worktree so agents pick up where user left off
+        changes_carried = False
         if has_pending and result.stash_ref:
             apply_result = subprocess.run(
                 ["git", "stash", "apply"],
@@ -2004,30 +2010,30 @@ def setup_worktree(out_path: Path) -> WorktreeResult:
             )
             if apply_result.returncode == 0:
                 log("Applied pending changes to worktree", "OK")
+                changes_carried = True
+                
+                # Only restore original directory if apply succeeded
+                pop_result = subprocess.run(
+                    ["git", "stash", "pop"],
+                    cwd=git_root, capture_output=True, text=True
+                )
+                if pop_result.returncode == 0:
+                    log("Restored pending changes in original directory", "OK")
+                    result.stash_ref = ""  # Stash consumed
+                else:
+                    log("Could not restore stash in original directory (stash preserved)", "WARN")
             else:
                 log("Could not apply pending changes to worktree (continuing without them)", "WARN")
-            
-            # Restore original directory to its pre-stash state
-            pop_result = subprocess.run(
-                ["git", "stash", "pop"],
-                cwd=git_root, capture_output=True, text=True
-            )
-            if pop_result.returncode == 0:
-                log("Restored pending changes in original directory", "OK")
-                result.stash_ref = ""  # Stash consumed
-            else:
-                log("Could not restore stash in original directory (stash preserved)", "WARN")
-        
-        result.out_path = worktree_dir
-        result.created = True
-        result.branch_name = branch_name
+                # Don't pop — leave stash intact so user can recover
         
         # Show confirmation
         panel_text = f"Original:  {git_root}\n"
         panel_text += f"Worktree:  {worktree_dir}\n"
         panel_text += f"Branch:    {branch_name}\n"
-        if has_pending:
+        if changes_carried:
             panel_text += f"Pending changes: carried over to worktree\n"
+        elif has_pending:
+            panel_text += f"Pending changes: could not carry over (stash preserved)\n"
         panel_text += f"\nYour original directory is untouched."
         console.print(Panel(panel_text, title="🔒 WORKTREE ISOLATION", border_style="bright_blue"))
         
@@ -2108,6 +2114,10 @@ def cleanup_worktree(wt: WorktreeResult):
         log(f"Cleaned up worktree: {wt.out_path}", "OK")
     except Exception:
         log(f"Could not auto-clean worktree at {wt.out_path}", "WARN")
+    
+    if wt.stash_ref:
+        console.print(f"[yellow]⚠️  Your pending changes are stashed. Restore with:[/yellow]")
+        console.print(f"[cyan]  cd {wt.git_root} && git stash pop[/cyan]")
 
 
 # ============================================================================
