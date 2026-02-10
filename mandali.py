@@ -22,6 +22,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import urllib.request
 import yaml
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +40,37 @@ console = Console()
 
 # GitHub Copilot SDK
 from copilot import CopilotClient
+
+__version__ = "0.1.0"
+GITHUB_REPO = "nmallick1/mandali"
+
+
+def _check_for_updates():
+    """Check GitHub for a newer version (runs in background thread, never blocks)."""
+    try:
+        url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/pyproject.toml"
+        req = urllib.request.Request(url, headers={"User-Agent": "mandali-update-check"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            content = resp.read().decode("utf-8")
+        
+        match = re.search(r'^version\s*=\s*"([^"]+)"', content, re.MULTILINE)
+        if not match:
+            return
+        
+        remote_version = match.group(1)
+        if remote_version != __version__:
+            console.print(
+                f"[dim]Update available: {__version__} → {remote_version}. "
+                f"Run: pip install --upgrade git+https://github.com/{GITHUB_REPO}.git[/dim]"
+            )
+    except Exception:
+        pass  # Network issues, rate limits — silently ignore
+
+
+def check_for_updates_async():
+    """Fire-and-forget update check in a daemon thread."""
+    t = threading.Thread(target=_check_for_updates, daemon=True)
+    t.start()
 
 
 def get_copilot_cli_path() -> str:
@@ -2816,10 +2849,14 @@ Example: python mandali.py --describe dev
     parser.add_argument('--max-retries', type=int, default=5,
                         help='Max verification-relaunch cycles after victory (0 = no verification, default: 5)')
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--version', action='version', version=f'mandali {__version__}')
     parser.add_argument('--describe', type=str, metavar='PERSONA',
                         help='Show detailed description of a persona (dev, security, pm, qa, sre)')
     
     args = parser.parse_args()
+    
+    # Check for updates (non-blocking background thread)
+    check_for_updates_async()
     
     # Handle --describe
     if args.describe:

@@ -27,21 +27,34 @@ copilot --version     # Should print the CLI version
 
 ## Quick Start
 
-```bash
-# Install dependencies
-pip install github-copilot-sdk pyyaml rich
+### Install
 
-# Default: Point at existing plan files and launch agents
+```bash
+# Option A: Install as a command (recommended)
+pip install git+https://github.com/nmallick1/mandali.git
+
+# Option B: Clone and run directly
+git clone https://github.com/nmallick1/mandali.git
+cd mandali
+pip install -r requirements.txt
+```
+
+Mandali checks for updates on each launch and notifies you when a newer version is available.
+
+### Run
+
+```bash
+# If installed via pip (Option A):
+mandali --plan phases/_INDEX.md --out-path ./output
+
+# If cloned (Option B):
 python mandali.py --plan phases/_INDEX.md --out-path ./output
 
-# Default: Prompt with references to existing plan files
-python mandali.py --prompt "Read phases/_CONTEXT.md and phases/_INDEX.md. Complete all phases." --out-path ./my-project
-
-# Opt-in: Generate a NEW plan from scratch via interview
-python mandali.py --prompt "Add caching to the API layer" --generate-plan --out-path ./output
+# Generate a NEW plan from scratch via interview
+mandali --prompt "Add caching to the API layer" --generate-plan --out-path ./output
 
 # Control verification retries (default: 5, set 0 to disable verification)
-python mandali.py --plan phases/_INDEX.md --out-path ./output --max-retries 3
+mandali --plan phases/_INDEX.md --out-path ./output --max-retries 3
 ```
 
 ---
