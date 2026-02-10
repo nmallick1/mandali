@@ -133,7 +133,7 @@ python mandali.py [OPTIONS]
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `--out-path <path>` | **Yes** | Output directory where Mandali creates files |
+| `--out-path <path>` | **Yes** | Output directory where Mandali creates files. If inside a git repo, a worktree is created automatically for isolation |
 | `--plan <path>` | One of plan/prompt | Path to existing plan (_INDEX.md or single plan.md) |
 | `--prompt <text>` | One of plan/prompt | Prompt with instructions and references to plan files |
 | `--generate-plan` | No (default: off) | Opt-in: run interview + plan generation instead of direct launch |
@@ -227,6 +227,40 @@ Add `--generate-plan` to trigger the full interview and plan generation flow. On
 ```bash
 python mandali.py --prompt "Add rate limiting to the API" --generate-plan --out-path ./output
 ```
+
+---
+
+## Workspace Isolation (Git Worktrees)
+
+When `--out-path` points to a directory inside a git repository, Mandali automatically creates a **git worktree** in a sibling directory. Agents work entirely in the worktree — your original directory is never touched.
+
+```
+myproject/                        ← your repo (untouched)
+myproject-mandali-20260210-053400/ ← worktree (agents work here)
+```
+
+**What happens:**
+1. Mandali detects `--out-path` is inside a git repo
+2. Creates a branch `mandali/session-<timestamp>`
+3. Creates a worktree at `<parent>/<dirname>-mandali-<timestamp>/`
+4. Redirects all agent work to the worktree
+5. After the run, shows instructions to merge or discard
+
+**After the run:**
+```bash
+# Review what agents changed
+git diff main..mandali/session-20260210-053400
+
+# Keep the changes
+cd myproject
+git merge mandali/session-20260210-053400
+
+# Or discard everything
+git worktree remove ../myproject-mandali-20260210-053400
+git branch -D mandali/session-20260210-053400
+```
+
+**When `--out-path` is NOT inside a git repo**, no worktree is created and agents work directly in the specified directory (same as before).
 
 ---
 
@@ -449,11 +483,11 @@ Our contribution is **practical refinements for production/unsupervised use**:
 ## Files
 
 ```
-.mandali/
-├── mandali.py  # Autonomous orchestrator
-├── config.yaml                # Personas, model, settings
-├── PRIOR_ART.md               # Framework comparison
-├── DecisionsTracker.md        # Deviation log template
+mandali/                           # Mandali source
+├── mandali.py                     # Autonomous orchestrator
+├── config.yaml                    # Personas, model, settings
+├── PRIOR_ART.md                   # Framework comparison
+├── DecisionsTracker.md            # Deviation log template
 ├── personas/
 │   ├── dev.persona.md
 │   ├── security.persona.md
@@ -461,20 +495,25 @@ Our contribution is **practical refinements for production/unsupervised use**:
 │   ├── qa.persona.md
 │   └── sre.persona.md
 
-<out-path>/                    # User-specified output directory
+# When --out-path is inside a git repo (worktree isolation):
+myproject/                         # Your repo (UNTOUCHED)
+myproject-mandali-<timestamp>/     # Worktree (agents work here)
 ├── {feature files created by agents}
-├── phases/                    # Phased plan files (copied or generated)
-│   ├── _CONTEXT.md            # Global context
-│   ├── _INDEX.md              # Phase tracking
-│   └── phase-*.md             # Individual phase files
-└── mandali-artifacts/         # Orchestration files
-    ├── conversation.txt       # Shared agent conversation (current round)
-    ├── conversation-round-*.txt  # Archived conversations from prior rounds
-    ├── satisfaction.txt       # Agent status tracking
-    ├── DecisionsTracker.md    # Deviation log (plan vs implementation)
-    ├── plan.md                # Combined plan content
-    ├── {extra plan files}     # Non-phase artifacts discovered
-    └── metrics.json           # Execution metrics
+├── phases/                        # Phased plan files (copied or generated)
+│   ├── _CONTEXT.md
+│   ├── _INDEX.md
+│   └── phase-*.md
+└── mandali-artifacts/             # Orchestration files
+    ├── conversation.txt
+    ├── conversation-round-*.txt
+    ├── satisfaction.txt
+    ├── DecisionsTracker.md
+    ├── plan.md
+    └── metrics.json
+
+# When --out-path is NOT inside a git repo (no isolation):
+<out-path>/                        # Agents work directly here
+├── {same layout as above}
 ```
 
 ---

@@ -1910,91 +1910,160 @@ Please continue based on this guidance.
 
 
 # ============================================================================
-# Git Restore Point
+# Git Worktree Isolation
 # ============================================================================
 
-def create_restore_point(out_path: Path) -> Optional[str]:
-    """Create a git restore point before Mandali agents start working.
+@dataclass
+class WorktreeResult:
+    """Result of worktree setup — carries state needed for exit instructions."""
+    out_path: Path              # The path agents should work in (worktree or original)
+    created: bool = False       # Whether a worktree was actually created
+    branch_name: str = ""       # e.g. mandali/session-20260210-053400
+    original_path: Path = None  # The user's original --out-path
+    git_root: Path = None       # Root of the original git repo
+    stash_ref: str = ""         # If user changes were stashed
+
+
+def setup_worktree(out_path: Path) -> WorktreeResult:
+    """Set up git worktree isolation if --out-path is inside a git repo.
     
-    Captures the exact state of the repo so the user can manually roll back.
-    Pending changes are stashed (not committed). Returns the HEAD commit hash
-    that serves as the restore point, or None on failure.
+    If inside a git repo: creates a sibling worktree directory so agents work
+    in isolation and the user's original directory is never touched.
+    If NOT inside a git repo: returns out_path unchanged (no isolation needed).
     """
+    resolved = out_path.resolve()
+    result = WorktreeResult(out_path=resolved, original_path=resolved)
+    
     try:
-        git_root = out_path.resolve()
-        
         # Check if inside a git repo
-        result = subprocess.run(
+        git_check = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
-            cwd=git_root, capture_output=True, text=True
+            cwd=resolved, capture_output=True, text=True
         )
         
-        if result.returncode != 0:
-            # Not a git repo — initialize one
-            log("No git repo found, initializing...", "INFO")
-            subprocess.run(["git", "init"], cwd=git_root, capture_output=True, text=True, check=True)
-            subprocess.run(["git", "add", "-A"], cwd=git_root, capture_output=True, text=True, check=True)
-            subprocess.run(
-                ["git", "commit", "-m", "mandali: initial commit (restore point)"],
-                cwd=git_root, capture_output=True, text=True, check=True
-            )
-            log("Initialized git repo with initial commit", "OK")
-        else:
-            git_root = Path(result.stdout.strip())
+        if git_check.returncode != 0:
+            # Not a git repo — no isolation needed
+            log("Not inside a git repo, skipping worktree isolation", "INFO")
+            return result
         
-        # Check for pending changes (tracked + untracked)
+        git_root = Path(git_check.stdout.strip())
+        result.git_root = git_root
+        
+        # Build worktree path: sibling in parent directory
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        branch_name = f"mandali/session-{timestamp}"
+        worktree_dir = git_root.parent / f"{git_root.name}-mandali-{timestamp}"
+        
+        # Handle stale worktree at target path
+        if worktree_dir.exists():
+            log(f"Found existing directory at {worktree_dir}", "WARN")
+            if Confirm.ask(f"Remove stale session at [cyan]{worktree_dir}[/cyan] and continue?"):
+                # Try to remove as worktree first, then as plain directory
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(worktree_dir)],
+                    cwd=git_root, capture_output=True, text=True
+                )
+                if worktree_dir.exists():
+                    shutil.rmtree(worktree_dir)
+                log("Removed stale session directory", "OK")
+            else:
+                log("User chose not to remove stale session, aborting", "ERROR")
+                sys.exit(1)
+        
+        # Stash pending changes before creating worktree
         status = subprocess.run(
             ["git", "status", "--porcelain"],
             cwd=git_root, capture_output=True, text=True, check=True
         )
         
-        stash_ref = ""
         if status.stdout.strip():
-            # Stash pending changes (include untracked files with -u)
             stash_msg = "mandali: pre-agent user changes"
             stash_result = subprocess.run(
                 ["git", "stash", "push", "-u", "-m", stash_msg],
                 cwd=git_root, capture_output=True, text=True, check=True
             )
             if "No local changes" not in stash_result.stdout:
-                stash_ref = "stash@{0}"
-                log(f"Stashed pending changes: {stash_ref}", "INFO")
+                result.stash_ref = "stash@{0}"
+                log(f"Stashed pending changes: {result.stash_ref}", "INFO")
         
-        # Get current HEAD as restore point
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+        # Create branch and worktree
+        subprocess.run(
+            ["git", "worktree", "add", "-b", branch_name, str(worktree_dir)],
             cwd=git_root, capture_output=True, text=True, check=True
         )
-        restore_hash = head.stdout.strip()
         
-        # Build restore instructions
-        instructions = f"restore_commit={restore_hash}\n"
-        instructions += f"stash_ref={stash_ref}\n"
-        instructions += f"\nTo restore to pre-mandali state:\n"
-        instructions += f"  1. git reset --hard {restore_hash}\n"
-        if stash_ref:
-            instructions += f"  2. git stash pop\n"
-        instructions += f"\nTo see what Mandali changed:\n"
-        instructions += f"  git diff {restore_hash}..HEAD\n"
+        result.out_path = worktree_dir
+        result.created = True
+        result.branch_name = branch_name
         
-        # Write to restore-point.txt
-        artifacts_dir = out_path / "mandali-artifacts"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        restore_file = artifacts_dir / "restore-point.txt"
-        restore_file.write_text(instructions, encoding='utf-8')
+        # Show confirmation
+        panel_text = f"Original:  {git_root}\n"
+        panel_text += f"Worktree:  {worktree_dir}\n"
+        panel_text += f"Branch:    {branch_name}\n"
+        if result.stash_ref:
+            panel_text += f"Stash:     {result.stash_ref} (your pending changes)\n"
+        panel_text += f"\nYour original directory is untouched."
+        console.print(Panel(panel_text, title="🔒 WORKTREE ISOLATION", border_style="bright_blue"))
         
-        # Print to console
-        panel_text = f"Commit: {restore_hash}\n"
-        if stash_ref:
-            panel_text += f"Stash:  {stash_ref} (pending user changes)\n"
-        panel_text += f"File:   {restore_file}"
-        console.print(Panel(panel_text, title="🔒 RESTORE POINT CREATED", border_style="bright_blue"))
+        return result
         
-        return restore_hash
-        
+    except subprocess.CalledProcessError as e:
+        log(f"Git worktree setup failed: {e.stderr or e}", "WARN")
+        log("Falling back to working directly in --out-path (no isolation)", "WARN")
+        return result
     except Exception as e:
-        log(f"Could not create restore point: {e}", "WARN")
-        return None
+        log(f"Worktree setup error: {e}", "WARN")
+        log("Falling back to working directly in --out-path (no isolation)", "WARN")
+        return result
+
+
+def print_worktree_instructions(wt: WorktreeResult):
+    """Print merge/discard instructions at the end of a run."""
+    if not wt.created:
+        return
+    
+    main_branch = "main"
+    try:
+        head_ref = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            cwd=wt.git_root, capture_output=True, text=True
+        )
+        if head_ref.returncode == 0:
+            main_branch = head_ref.stdout.strip().split("/")[-1]
+    except Exception:
+        pass
+    
+    merge_cmds = (
+        f"  cd {wt.git_root}\n"
+        f"  git merge {wt.branch_name}\n"
+    )
+    
+    discard_cmds = (
+        f"  git worktree remove {wt.out_path}\n"
+        f"  git branch -D {wt.branch_name}\n"
+    )
+    
+    diff_cmd = f"  git diff {main_branch}..{wt.branch_name}"
+    
+    stash_note = ""
+    if wt.stash_ref:
+        stash_note = (
+            f"\n[bold]Restore your stashed changes (in original repo):[/bold]\n"
+            f"  cd {wt.git_root}\n"
+            f"  git stash pop\n"
+        )
+    
+    text = (
+        f"[bold]To keep the changes (merge into {main_branch}):[/bold]\n"
+        f"{merge_cmds}\n"
+        f"[bold]To review before merging:[/bold]\n"
+        f"{diff_cmd}\n\n"
+        f"[bold]To discard everything:[/bold]\n"
+        f"{discard_cmds}"
+        f"{stash_note}"
+    )
+    
+    console.print(Panel(text, title="📋 NEXT STEPS — Worktree", border_style="cyan"))
 
 
 # ============================================================================
@@ -2118,7 +2187,12 @@ async def async_main(args):
         
         # Get plan content
         out_path = args.out_path.resolve()
+        out_path.mkdir(parents=True, exist_ok=True)
         prompt_context = args.prompt if args.prompt else None
+        
+        # Set up worktree isolation if out_path is inside a git repo
+        worktree = setup_worktree(out_path)
+        out_path = worktree.out_path
         
         if args.generate_plan and args.prompt:
             # ============================================================
@@ -2215,6 +2289,8 @@ async def async_main(args):
                     choice = Prompt.ask("[bold]Accept or Reject?[/bold]", choices=["a", "r"], default="a").lower()
                     if choice == 'r':
                         log("Launch rejected by user", "WARN")
+                        if worktree.created:
+                            console.print(f"[dim]To remove the worktree: git worktree remove {worktree.out_path} && git branch -D {worktree.branch_name}[/dim]")
                         return 0
                     elif choice == 'a':
                         log("Artifacts accepted, preparing to launch", "OK")
@@ -2244,9 +2320,6 @@ async def async_main(args):
         
         log(f"Workspace: {workspace.path}", "INFO")
         log(f"Artifacts: {workspace.artifacts_path}", "INFO")
-        
-        # Create git restore point before agents start any work
-        create_restore_point(out_path)
         
         # Determine plan location description for agents
         if workspace.is_phased_plan():
@@ -2459,6 +2532,9 @@ Human review recommended.
             summary_table.add_row("Verification", verified_text)
         console.print(summary_table)
         
+        # Show worktree merge/discard instructions
+        print_worktree_instructions(worktree)
+        
         return 0 if success else 1
         
     finally:
@@ -2649,6 +2725,11 @@ Personas:
   pm         Product Manager — acceptance criteria, progress tracking, user delight
   qa         Quality Assurance — testing, edge cases, user journey validation
   sre        Site Reliability Engineer — observability, debuggability, failure modes
+
+Workspace Isolation:
+  If --out-path is inside a git repo, Mandali automatically creates a git worktree
+  in a sibling directory so agents work in isolation. Your original directory is
+  never touched. After the run, you can merge or discard the changes.
 
 Verification (Trust but Verify):
   After all agents declare SATISFIED, a verification agent compares plan vs
