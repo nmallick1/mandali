@@ -2092,6 +2092,24 @@ def print_worktree_instructions(wt: WorktreeResult):
     console.print(Panel(text, title="📋 NEXT STEPS — Worktree", border_style="cyan"))
 
 
+def cleanup_worktree(wt: WorktreeResult):
+    """Remove worktree and branch when no agent work was done (early exit)."""
+    if not wt.created:
+        return
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(wt.out_path)],
+            cwd=wt.git_root, capture_output=True, text=True
+        )
+        subprocess.run(
+            ["git", "branch", "-D", wt.branch_name],
+            cwd=wt.git_root, capture_output=True, text=True
+        )
+        log(f"Cleaned up worktree: {wt.out_path}", "OK")
+    except Exception:
+        log(f"Could not auto-clean worktree at {wt.out_path}", "WARN")
+
+
 # ============================================================================
 # Plan Generation Flow
 # ============================================================================
@@ -2226,6 +2244,7 @@ async def async_main(args):
             # ============================================================
             plan_content = await run_generate_plan_flow(orchestrator, args.prompt, out_path)
             if plan_content is None:
+                cleanup_worktree(worktree)
                 return 1
         
         else:
@@ -2245,15 +2264,18 @@ async def async_main(args):
                     if Confirm.ask("[yellow]Would you like to generate a plan from this prompt instead?[/yellow]"):
                         plan_content = await run_generate_plan_flow(orchestrator, args.prompt, out_path)
                         if plan_content is None:
+                            cleanup_worktree(worktree)
                             return 1
                     else:
                         log("Use --generate-plan to create a plan from scratch", "INFO")
+                        cleanup_worktree(worktree)
                         return 1
             else:
                 # --plan provided: start from the plan file
                 plan_path = Path(args.plan)
                 if not plan_path.exists():
                     log(f"Plan not found: {plan_path}", "ERR")
+                    cleanup_worktree(worktree)
                     return 1
                 initial_paths = [plan_path.resolve()]
                 # If pointing at _INDEX.md/_CONTEXT.md, include the parent dir
@@ -2272,12 +2294,14 @@ async def async_main(args):
                     if args.prompt and Confirm.ask("[yellow]Would you like to generate a plan from this prompt instead?[/yellow]"):
                         plan_content = await run_generate_plan_flow(orchestrator, args.prompt, out_path)
                         if plan_content is None:
+                            cleanup_worktree(worktree)
                             return 1
                     else:
                         if not args.prompt:
                             log("Provide a --prompt to generate a plan from scratch", "INFO")
                         else:
                             log("Use --generate-plan to create a plan from scratch", "INFO")
+                        cleanup_worktree(worktree)
                         return 1
             
             # Only show artifact UI if we discovered artifacts (not generated a plan)
@@ -2315,8 +2339,7 @@ async def async_main(args):
                     choice = Prompt.ask("[bold]Accept or Reject?[/bold]", choices=["a", "r"], default="a").lower()
                     if choice == 'r':
                         log("Launch rejected by user", "WARN")
-                        if worktree.created:
-                            console.print(f"[dim]To remove the worktree: git worktree remove {worktree.out_path} && git branch -D {worktree.branch_name}[/dim]")
+                        cleanup_worktree(worktree)
                         return 0
                     elif choice == 'a':
                         log("Artifacts accepted, preparing to launch", "OK")
