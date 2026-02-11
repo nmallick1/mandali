@@ -662,7 +662,7 @@ End EVERY message with one of:
             log(f"{agent.mention} introduced themselves", "AGENT")
     except Exception as e:
         log(f"{agent.mention} failed to initialize: {e}", "ERR")
-        return
+        raise
     
     # Autonomous loop - agent reads conversation themselves
     last_check_position = 0
@@ -1523,14 +1523,63 @@ class AutonomousOrchestrator:
         self.agents: Dict[str, PersonaAgent] = {}
         self.model = config['orchestrator'].get('model', 'claude-sonnet-4')
         self.metrics = Metrics()
+        self._cli_path: Optional[str] = None
+        self._workspace: Optional['Workspace'] = None
+        self._plan_content: Optional[str] = None
     
     async def start(self):
         log("Starting Copilot client...", "INFO")
-        cli_path = get_copilot_cli_path()
-        log(f"Using CLI at: {cli_path}", "INFO")
-        self.client = CopilotClient({"cli_path": cli_path})
-        await self.client.start()
+        self._cli_path = get_copilot_cli_path()
+        log(f"Using CLI at: {self._cli_path}", "INFO")
+        await self._connect_with_retry()
         log("Copilot client ready", "OK")
+    
+    async def _connect_with_retry(self, max_retries: int = 3):
+        """Connect to Copilot CLI with retry logic for transient failures."""
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            self.client = CopilotClient({"cli_path": self._cli_path})
+            try:
+                await self.client.start()
+                return
+            except (TimeoutError, asyncio.TimeoutError, RuntimeError, ConnectionError, OSError) as e:
+                last_error = e
+                try:
+                    await self.client.stop()
+                except Exception:
+                    pass
+                if attempt < max_retries:
+                    wait = attempt * 5
+                    log(f"Copilot CLI connection failed (attempt {attempt}/{max_retries}): {e}", "WARN")
+                    log(f"Retrying in {wait}s...", "INFO")
+                    await asyncio.sleep(wait)
+        self.client = None
+        raise RuntimeError(
+            f"Copilot CLI failed to connect after {max_retries} attempts. "
+            f"Last error: {last_error}"
+        )
+    
+    async def restart(self):
+        """Tear down the current client and reconnect (e.g. after connection loss)."""
+        log("Reconnecting to Copilot CLI...", "WARN")
+        if self.client:
+            try:
+                await self.client.stop()
+            except Exception:
+                pass
+            self.client = None
+        await self._connect_with_retry()
+        log("Reconnected to Copilot CLI", "OK")
+    
+    async def ensure_client(self):
+        """Verify the client is alive; restart if it has died."""
+        if not self.client:
+            await self.restart()
+            return
+        try:
+            await self.client.ping()
+        except Exception:
+            await self.restart()
     
     async def stop_agents(self):
         """Stop all agent tasks/sessions but keep the client alive for relaunch."""
@@ -1553,6 +1602,8 @@ class AutonomousOrchestrator:
     
     async def launch_agents(self, workspace: Workspace, plan_content: str):
         """Launch all agents as background tasks."""
+        self._workspace = workspace
+        self._plan_content = plan_content
         personas = self.config.get('personas', [])
         
         # Query actual available models from SDK and show active model
@@ -1688,6 +1739,43 @@ class AutonomousOrchestrator:
                 return sys.stdin.readline().strip() or None
             return None
     
+    async def _check_and_recover_agents(self):
+        """Detect crashed agent tasks and relaunch them automatically."""
+        for agent_id, agent in list(self.agents.items()):
+            if agent.task and agent.task.done():
+                exc = agent.task.exception() if not agent.task.cancelled() else None
+                if exc:
+                    log(f"{agent.mention} crashed: {exc}", "WARN")
+                else:
+                    # Task finished normally (e.g. victory signal) — skip relaunch
+                    continue
+                
+                # Clean up dead session
+                if agent.session:
+                    try:
+                        await agent.session.destroy()
+                    except Exception:
+                        pass
+                    agent.session = None
+                
+                # Ensure client is still alive before relaunching
+                try:
+                    await self.ensure_client()
+                except Exception as e:
+                    log(f"Cannot recover {agent.mention}: client reconnect failed ({e})", "ERR")
+                    continue
+                
+                # Relaunch the agent
+                log(f"Relaunching {agent.mention}...", "INFO")
+                is_first = (agent_id == list(self.agents.keys())[0])
+                agent.task = asyncio.create_task(
+                    run_autonomous_agent(
+                        self.client, agent, self._workspace, self._plan_content,
+                        self.model, is_first=is_first
+                    )
+                )
+                log(f"{agent.mention} relaunched", "OK")
+    
     async def monitor_loop(self, workspace: Workspace, max_stall_minutes: int = 5, is_final_round: bool = True):
         """
         Interactive passive monitoring loop.
@@ -1736,6 +1824,9 @@ class AutonomousOrchestrator:
                 await self.announce_victory(workspace, is_final=is_final_round)
                 self.metrics.victory = True
                 return True
+            
+            # Check agent health — restart any that crashed
+            await self._check_and_recover_agents()
             
             # Check for inactivity
             last_activity = get_last_activity_time(workspace)
@@ -2284,7 +2375,25 @@ async def async_main(args):
     orchestrator = AutonomousOrchestrator(config, args.verbose)
     
     try:
-        await orchestrator.start()
+        try:
+            await orchestrator.start()
+        except RuntimeError as e:
+            log(str(e), "ERROR")
+            console.print(Panel(
+                "[bold]The Copilot CLI process failed to respond in time.[/bold]\n\n"
+                "Common causes:\n"
+                "  • MCP servers in your config are slow to start or unreachable\n"
+                "  • The Copilot CLI is not authenticated (run [cyan]copilot auth login[/cyan])\n"
+                "  • Network issues or proxy blocking the connection\n"
+                "  • The CLI version is incompatible with the SDK\n\n"
+                "Troubleshooting:\n"
+                "  1. Run [cyan]copilot --version[/cyan] to verify the CLI works\n"
+                "  2. Check your MCP config: [cyan]~/.copilot/mcp-config.json[/cyan]\n"
+                "  3. Try running with fewer MCP servers to isolate the issue",
+                title="⚠️  Startup Failed",
+                border_style="yellow",
+            ))
+            return 1
         
         # Get plan content
         out_path = args.out_path.resolve()
