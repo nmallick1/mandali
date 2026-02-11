@@ -1539,6 +1539,7 @@ class AutonomousOrchestrator:
         self._cli_path: Optional[str] = None
         self._workspace: Optional['Workspace'] = None
         self._plan_content: Optional[str] = None
+        self._user_intent: Optional[str] = None
     
     async def start(self):
         log("Starting Copilot client...", "INFO")
@@ -1948,6 +1949,19 @@ If no deviations occurred, acknowledge this and proceed.
                     else:
                         # DecisionsTracker was updated — record the new mtime
                         decisions_mtime = current_mtime
+                    
+                    # Reinforce original user intent at every phase transition
+                    if self._user_intent:
+                        append_to_conversation(workspace, "ORCHESTRATOR", f"""
+@Team - Phase transition checkpoint. Re-anchor on the original intent:
+
+> {self._user_intent}
+
+Before starting the next phase:
+1. Does what we've built so far still serve this intent? Are we drifting?
+2. Have you made assumptions about things the user didn't specify? (e.g., visual style, data format, defaults, error behavior) Record them in DecisionsTracker.md if not already done.
+3. Are there implicit expectations for this type of application that we haven't addressed yet?
+""")
     
     async def announce_victory(self, workspace: Workspace, is_final: bool = True):
         """Inject victory message. If not final, announce verification pending."""
@@ -2643,6 +2657,9 @@ Post when you're ready for design discussion.
 
 Use this alongside the plan files to guide your work.
 """)
+        
+        # Store original user intent for periodic reinforcement during phase transitions
+        orchestrator._user_intent = prompt_context
         
         orchestrator.metrics.start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         

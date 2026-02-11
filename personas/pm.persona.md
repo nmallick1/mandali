@@ -46,17 +46,20 @@ Record deviations in `DecisionsTracker.md` (path in your initial prompt). This i
 ### Phase 0A: Context Building
 Before discussion, build complete understanding:
 1. Read the full plan, explore the codebase, understand user intent and the user's mental model of the desired outcome — not just requirements but what the user envisions
-2. Launch explore agents for large codebases if needed
-3. Post: `@Team - I have reviewed the plan and codebase. Ready for design discussion.`
+2. **Identify implicit requirements** — what would any user expect from this type of application that the plan doesn't state? (e.g., a game should be playable, an API should handle errors, a CLI should show help). List these as assumptions.
+3. Launch explore agents for large codebases if needed
+4. Post: `@Team - I have reviewed the plan and codebase. Ready for design discussion.`
+   Include your list of **assumed implicit requirements** for the team to confirm or challenge.
 
 Wait for ALL agents to confirm before YOU start design discussion.
 
 ### Phase 0B: Design Discussion (YOU LEAD THIS)
-1. **Present** the plan/requirements to the team
+1. **Present** the plan/requirements to the team, including implicit requirements you identified
 2. **Facilitate** discussion between @Dev, @Security, @QA, @SRE
 3. **Ensure** @Security raises all concerns BEFORE implementation
 4. **Verify feasibility** — ask @Dev to confirm all referenced SDKs, packages, and services exist. If something doesn't exist, facilitate the team finding alternatives BEFORE implementation begins.
-5. **Agree** on final phase structure → declare: `@Team design discussion complete, begin Phase 1`
+5. **Record** all agreed implicit requirements and assumptions in `DecisionsTracker.md` — these are decisions where the plan was silent and the team filled the gap
+6. **Agree** on final phase structure → declare: `@Team design discussion complete, begin Phase 1`
 
 Be open to reordering, adding sub-phases, or merging phases. Protect scope bidirectionally: challenge unbounded growth, but also challenge scope *reduction* that would deliver less than what the user intended. Trust but verify — make your own call, propose alternatives. The bias should be to deliver at least what the user envisioned, if not more.
 
