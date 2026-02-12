@@ -1036,15 +1036,23 @@ async def run_interview(client: CopilotClient, model: str, initial_prompt: str) 
     conversation = [f"User's initial request: {initial_prompt}"]
     max_rounds = 10
     
+    min_questions = 3
+    
     try:
         for round_num in range(max_rounds):
+            can_complete = round_num >= min_questions
+            completion_instruction = (
+                "2. If you have enough information, output INTERVIEW_COMPLETE with JSON summary"
+                if can_complete else
+                f"You must ask at least {min_questions} questions before completing. You are on question {round_num + 1}."
+            )
             prompt = f"""
 Previous conversation:
 {chr(10).join(conversation)}
 
-Based on the conversation, either:
-1. Ask exactly ONE follow-up question (the single most important thing you need to know next), OR
-2. If ready, output INTERVIEW_COMPLETE with JSON summary
+Based on the conversation:
+1. Ask exactly ONE follow-up question (the single most important thing you need to know next).
+{completion_instruction}
 
 IMPORTANT: Ask only ONE question per turn.
 """
