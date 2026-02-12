@@ -1207,6 +1207,98 @@ START by creating `phases/_CONTEXT.md`, then `phases/_INDEX.md`, then each phase
         return ""
 
 
+async def convert_to_phased_plan(client: CopilotClient, model: str,
+                                  plan_content: str, out_path: Path) -> str:
+    """Convert a non-phased plan into the standard phased structure.
+    
+    Takes any plan format (flat doc, bullet list, PRD, etc.) and generates
+    _CONTEXT.md, _INDEX.md, and phase-XX-name.md files so the agent
+    workflow (phase transitions, quality gates, tracking) works correctly.
+    """
+    log("Converting plan to phased structure...", "INFO")
+    
+    phases_path = out_path / "phases"
+    phases_path.mkdir(parents=True, exist_ok=True)
+    
+    session = await client.create_session({
+        "model": model,
+        "system_message": PLAN_GENERATOR_PROMPT,
+        "working_directory": str(out_path)
+    })
+    
+    prompt = f"""
+Convert the following plan into a PHASED implementation structure with SEPARATE FILES.
+
+## Original Plan Content
+{plan_content}
+
+## CRITICAL INSTRUCTIONS
+
+The plan above may not be in phased format. Your job is to:
+1. Understand the intent and requirements from the plan
+2. Restructure it into logical phases with clear dependencies
+3. Preserve ALL original requirements — do not drop anything
+4. Add quality gates and test requirements for each phase
+
+You MUST create the following files using the `create` tool:
+
+1. **`phases/_CONTEXT.md`** - Global context extracted from the plan:
+   - Problem statement, architecture decisions, security requirements
+   - Non-negotiables, success criteria
+
+2. **`phases/_INDEX.md`** - Phase tracking table:
+   - Table of all phases with status (all ⏳ Not Started)
+   - Phase dependencies diagram
+   - Links to phase files
+
+3. **`phases/phase-XX-name.md`** - One file PER PHASE with:
+   - Phase goal, detailed tasks (numbered XX.1, XX.2, etc.)
+   - File paths for each task, quality gates
+
+Create EACH file separately using the `create` tool.
+The working directory is: {out_path}
+Create files in the `phases/` subfolder.
+
+START by creating `phases/_CONTEXT.md`, then `phases/_INDEX.md`, then each phase file.
+"""
+    
+    done = asyncio.Event()
+    
+    def on_event(event):
+        if event.type.value == "session.idle":
+            done.set()
+    
+    session.on(on_event)
+    try:
+        await session.send({"prompt": prompt})
+        await done.wait()
+    finally:
+        await session.destroy()
+    
+    # Read the created plan files
+    result_content = ""
+    
+    context_file = phases_path / "_CONTEXT.md"
+    if context_file.exists():
+        result_content += f"# === _CONTEXT.md ===\n\n{context_file.read_text(encoding='utf-8')}\n\n"
+    
+    index_file = phases_path / "_INDEX.md"
+    if index_file.exists():
+        result_content += f"# === _INDEX.md ===\n\n{index_file.read_text(encoding='utf-8')}\n\n"
+    
+    phase_files = sorted(phases_path.glob("phase-*.md"))
+    for pf in phase_files:
+        result_content += f"# === {pf.name} ===\n\n{pf.read_text(encoding='utf-8')}\n\n"
+    
+    if result_content:
+        log(f"Converted to phased plan with {len(phase_files)} phases", "OK")
+        return result_content
+    
+    # Conversion failed — return original content as fallback
+    log("Phased conversion failed, using original plan", "WARN")
+    return plan_content
+
+
 # ============================================================================
 # Plan Artifact Discovery (skip-planning default flow)
 # ============================================================================
@@ -2566,6 +2658,14 @@ async def async_main(args):
         workspace = Workspace.create(out_path)
         workspace.ensure_exists()
         workspace.plan_file.write_text(plan_content, encoding='utf-8')
+        
+        # Convert non-phased plans to phased structure for consistent agent workflow
+        if not workspace.is_phased_plan():
+            log("Plan is not in phased format, converting...", "INFO")
+            plan_content = await convert_to_phased_plan(
+                orchestrator.client, orchestrator.model, plan_content, out_path
+            )
+            workspace.plan_file.write_text(plan_content, encoding='utf-8')
         
         log(f"Workspace: {workspace.path}", "INFO")
         log(f"Artifacts: {workspace.artifacts_path}", "INFO")
