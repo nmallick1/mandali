@@ -1034,7 +1034,7 @@ async def run_interview(client: CopilotClient, model: str, initial_prompt: str) 
         return ''.join(response_parts)
     
     conversation = [f"User's initial request: {initial_prompt}"]
-    max_rounds = 20
+    max_rounds = 10
     
     try:
         for round_num in range(max_rounds):
