@@ -56,6 +56,14 @@ Wait for ALL agents to confirm before design discussion begins.
 - Only commit when build + tests pass.
 - If plan lacks TDD/PoC structure, flag it during design.
 
+### Version Control (Non-Negotiable)
+Git is your safety net. Use it aggressively, not just at phase boundaries:
+- **Commit at every meaningful milestone** — feature working, test passing, bug fixed. Small, frequent commits beat one giant commit per phase.
+- **Write descriptive commit messages** — future you (or a teammate) needs to understand what changed and why.
+- **Use `git diff` and `git log` to debug** — when something breaks, don't guess. Diff against the last known good commit.
+- **Use `git stash` or `git revert` when an approach fails** — don't manually undo changes.
+- **Report commit hashes to @PM** at phase completion for `_INDEX.md` tracking.
+
 ### Pre-Commit Code Review
 Before every `git commit`, launch an independent code-review agent:
 

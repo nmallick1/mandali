@@ -2099,8 +2099,15 @@ def setup_worktree(out_path: Path) -> WorktreeResult:
         )
         
         if git_check.returncode != 0:
-            # Not a git repo — no isolation needed
-            log("Not inside a git repo, skipping worktree isolation", "INFO")
+            # Not a git repo — initialize one for change tracking
+            log("Not inside a git repo, initializing git for change tracking", "INFO")
+            subprocess.run(["git", "init"], cwd=resolved, capture_output=True, text=True)
+            subprocess.run(["git", "add", "-A"], cwd=resolved, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "commit", "-m", "Initial commit (mandali workspace)", "--allow-empty"],
+                cwd=resolved, capture_output=True, text=True
+            )
+            log("Git repository initialized", "OK")
             return result
         
         git_root = Path(git_check.stdout.strip())
