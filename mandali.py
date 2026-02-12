@@ -745,7 +745,7 @@ def extract_and_update_status(workspace: Workspace, agent_id: str, response: str
 
 INTERVIEWER_PROMPT = """You are an AI interviewer gathering requirements from a user.
 
-IMPORTANT: You are in interview mode only. Do NOT use any tools or create files. Just ask questions and gather information through conversation.
+IMPORTANT: Do NOT use any tools or create files. Respond with text only.
 
 Your goal: Understand what the user wants to achieve — their desired OUTCOME, their preferences, and what "done" looks like FROM THEIR PERSPECTIVE. You are NOT gathering implementation details — a team of AI agents will figure out the how.
 
@@ -764,13 +764,11 @@ Your goal: Understand what the user wants to achieve — their desired OUTCOME, 
 
 ## IMPLICIT REQUIREMENTS:
 Users underspecify. They state *what* they want but omit *obvious* expectations.
-Your job is to identify what's implied but unstated, state your assumptions, and confirm them.
+Identify what's implied but unstated and include it in your questions so the user can confirm or correct.
 
-- After hearing the user's request, state back what you believe the **implied expectations** are
-  (e.g., "You said 'build a game' — I'm assuming it should be playable, have a win/lose condition, and handle invalid input gracefully. Correct?")
 - Identify the **table-stakes** for this type of deliverable — the things any user would expect even if they didn't say them
-- When the user gives a vague answer, propose a concrete default rather than asking them to be more specific
-  (e.g., instead of "What database?", say "I'll use SQLite for simplicity — does that work, or do you need something else?")
+- When something is ambiguous, propose a concrete default rather than leaving it open-ended
+  (e.g., instead of "What database?", say "I'll assume SQLite for simplicity — does that work, or do you need something else?")
 
 ## WHAT NOT TO ASK ABOUT:
 - Testing approach, test frameworks, TDD — the team decides this
@@ -778,38 +776,61 @@ Your job is to identify what's implied but unstated, state your assumptions, and
 - Phase breakdown, task dependencies, quality gates — the team decides this
 - Security approach, logging, error handling — the team decides this
 - Anything the user would reasonably say "I don't care, just make it work" to
+"""
 
-## INTERVIEWING STYLE:
-- Ask one question at a time
-- Probe deeper on vague answers
-- Prefer proposing reasonable defaults over open-ended questions
-- Stop when you understand what the user wants, not when you have an implementation plan
-- DO NOT use tools — this is a conversation only
+INTERVIEWER_QUESTIONS_INSTRUCTION = """Based on the user's request below, generate a list of clarifying questions.
 
-## COMPLETION:
-When you understand the user's desired outcome, preferences, and scope, output exactly: INTERVIEW_COMPLETE
+## Rules:
+- Focus ONLY on understanding what the user wants (outcome, preferences, scope) — NOT implementation details
+- Each question should address ONE specific thing
+- Propose concrete defaults where possible instead of open-ended questions
+- Include implicit requirement confirmations (table-stakes the user likely expects but didn't state)
+- Don't ask about things the user already specified clearly in their request
+- Aim for quality over quantity — ask what genuinely needs clarification
+
+## Output format:
+Return a JSON array of questions. Each question is a string.
+
+```json
+["Question 1?", "Question 2?", "Question 3?"]
+```
+
+## User's request:
+{prompt}
+"""
+
+INTERVIEWER_SUMMARY_INSTRUCTION = """Based on the user's original request and their answers to your questions, produce a structured summary for the implementation team.
+
+## Original request:
+{prompt}
+
+## Questions and answers:
+{qa_pairs}
+
+## Output format:
+Output exactly: INTERVIEW_COMPLETE
 
 Then output JSON:
 ```json
-{
+{{
   "project_name": "...",
   "outcome": "...",
   "success_criteria": ["..."],
-  "user_preferences": {"key": "value"},
+  "user_preferences": {{"key": "value"}},
   "existing_context_files": ["path/to/file", "..."],
   "existing_phase_files": ["path/to/phase-01.md", "..."],
   "completed_phases": ["phase-01", "phase-02", "..."],
   "resume_from_phase": "phase-XX or null if starting fresh",
   "stop_after_phase": "phase-XX or null if completing all",
-  "scope": {
+  "scope": {{
     "in": ["..."],
     "out": ["..."]
-  },
+  }},
   "codebase_root": "...",
   "output_directory": "...",
   "constraints": ["..."],
   "implicit_requirements": ["..."]
-}
+}}
 ```
 """
 
@@ -947,7 +968,7 @@ Do NOT create vague tasks like "implement the feature". Be specific: "Create ISk
 
 
 async def run_interview(client: CopilotClient, model: str, initial_prompt: str) -> dict:
-    """Run interactive interview to gather requirements for plan generation."""
+    """Run interactive interview: generate questions upfront, walk through them, synthesize."""
     log("Starting AI Interviewer...", "AGENT")
     console.print(Panel(
         "I'll ask a few questions to understand what you want.\n"
@@ -955,11 +976,9 @@ async def run_interview(client: CopilotClient, model: str, initial_prompt: str) 
         title="🎤 AI INTERVIEWER", border_style="cyan"
     ))
     
-    # Interviewer doesn't need MCP servers - just conversation
     session = await client.create_session({
         "model": model,
         "system_message": INTERVIEWER_PROMPT
-        # No working_directory or mcp_servers - interviewer just asks questions
     })
     
     async def send_and_wait(prompt: str) -> str:
@@ -982,50 +1001,77 @@ async def run_interview(client: CopilotClient, model: str, initial_prompt: str) 
         
         return ''.join(response_parts)
     
-    conversation = [f"User's initial request: {initial_prompt}"]
-    max_rounds = 10
-    
     try:
-        for round_num in range(max_rounds):
-            prompt = f"""
-Previous conversation:
-{chr(10).join(conversation)}
-
-Based on the conversation, either:
-1. Ask exactly ONE follow-up question (the single most important thing you still need to understand about what the user wants), OR
-2. If you clearly understand the user's desired outcome, preferences, and scope, output INTERVIEW_COMPLETE with JSON summary
-
-IMPORTANT: Ask only ONE question per turn. Focus on what the user wants, not how the team will build it.
-"""
-            response = await send_and_wait(prompt)
-            
-            # Check completion
-            if "INTERVIEW_COMPLETE" in response:
-                log("Interview complete", "OK")
-                try:
-                    json_start = response.find("```json")
-                    json_end = response.find("```", json_start + 7)
-                    if json_start != -1 and json_end != -1:
-                        json_str = response[json_start + 7:json_end].strip()
-                        return json.loads(json_str)
-                except json.JSONDecodeError:
-                    log("Failed to parse JSON, using raw", "WARN")
-                return {"raw_summary": response}
-            
-            # Interactive Q&A
-            question_num = round_num + 1
-            console.print(f"\n{escape(response)}\n")
-            user_input = Prompt.ask(f"[bold cyan]>[/bold cyan] [dim](question {question_num})[/dim]").strip()
-            
-            if not user_input:
-                console.print("[yellow]Please provide an answer.[/yellow]")
-                continue
-            
-            conversation.append(f"Interviewer: {response}")
-            conversation.append(f"User: {user_input}")
+        # Phase 1: Generate all questions upfront
+        log("Generating interview questions...", "INFO")
+        questions_prompt = INTERVIEWER_QUESTIONS_INSTRUCTION.format(prompt=initial_prompt)
+        response = await send_and_wait(questions_prompt)
         
-        log("Interview exceeded max rounds", "WARN")
-        return {"error": "Interview incomplete"}
+        # Parse questions from JSON
+        questions = []
+        try:
+            json_start = response.find("[")
+            json_end = response.rfind("]") + 1
+            if json_start != -1 and json_end > json_start:
+                questions = json.loads(response[json_start:json_end])
+        except json.JSONDecodeError:
+            # Try extracting from code block
+            try:
+                cb_start = response.find("```json")
+                cb_end = response.find("```", cb_start + 7)
+                if cb_start != -1 and cb_end != -1:
+                    questions = json.loads(response[cb_start + 7:cb_end].strip())
+            except (json.JSONDecodeError, ValueError):
+                pass
+        
+        if not questions:
+            log("Failed to generate questions, using fallback", "WARN")
+            questions = [
+                "What does 'done' look like for you? How will you know this is successful?",
+                "Is there any existing code, project, or prior work to build on?",
+                "Are there any specific preferences or constraints I should know about?"
+            ]
+        
+        log(f"Generated {len(questions)} questions", "OK")
+        
+        # Phase 2: Walk through questions one at a time
+        qa_pairs = []
+        total = len(questions)
+        
+        for i, question in enumerate(questions, 1):
+            console.print(f"\n{escape(question)}\n")
+            answer = Prompt.ask(f"[bold cyan]>[/bold cyan] [dim](question {i} of {total})[/dim]").strip()
+            
+            if not answer:
+                answer = "(no answer — use your best judgment)"
+            
+            qa_pairs.append({"question": question, "answer": answer})
+        
+        # Phase 3: Synthesize into structured summary
+        log("Synthesizing interview results...", "INFO")
+        qa_text = "\n".join(
+            f"Q: {qa['question']}\nA: {qa['answer']}\n"
+            for qa in qa_pairs
+        )
+        summary_prompt = INTERVIEWER_SUMMARY_INSTRUCTION.format(
+            prompt=initial_prompt, qa_pairs=qa_text
+        )
+        response = await send_and_wait(summary_prompt)
+        
+        # Parse the JSON summary
+        if "INTERVIEW_COMPLETE" in response:
+            log("Interview complete", "OK")
+            try:
+                json_start = response.find("```json")
+                json_end = response.find("```", json_start + 7)
+                if json_start != -1 and json_end != -1:
+                    json_str = response[json_start + 7:json_end].strip()
+                    return json.loads(json_str)
+            except json.JSONDecodeError:
+                log("Failed to parse JSON summary, using raw", "WARN")
+        
+        return {"raw_summary": response, "qa_pairs": qa_pairs}
+    
     finally:
         try:
             await session.destroy()
