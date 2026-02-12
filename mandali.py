@@ -1043,8 +1043,12 @@ Previous conversation:
 {chr(10).join(conversation)}
 
 Based on the conversation, either:
-1. Ask 1-3 follow-up questions (focus on TDD phases and testability), OR
+1. Ask exactly ONE follow-up question (the single most important thing you need to know next), OR
 2. If ready, output INTERVIEW_COMPLETE with JSON summary
+
+IMPORTANT: Ask only ONE question per turn. After your question, output a progress estimate on a new line:
+PROGRESS: <current>/<estimated_total>
+Where <current> is how many questions you've asked so far (including this one) and <estimated_total> is your best guess of total questions needed. Example: PROGRESS: 3/8
 """
             response = await send_and_wait(prompt)
             
@@ -1061,9 +1065,20 @@ Based on the conversation, either:
                     log("Failed to parse JSON, using raw", "WARN")
                 return {"raw_summary": response}
             
+            # Parse progress indicator if present
+            display_response = response
+            progress_label = ""
+            progress_match = re.search(r'PROGRESS:\s*(\d+)\s*/\s*(\d+)', response)
+            if progress_match:
+                current_q = progress_match.group(1)
+                total_q = progress_match.group(2)
+                progress_label = f" [dim](question {current_q} of ~{total_q})[/dim]"
+                # Strip the PROGRESS line from displayed output
+                display_response = response[:progress_match.start()].rstrip()
+            
             # Interactive Q&A
-            console.print(f"\n{escape(response)}\n")
-            user_input = Prompt.ask("[bold cyan]>[/bold cyan]").strip()
+            console.print(f"\n{escape(display_response)}\n")
+            user_input = Prompt.ask(f"[bold cyan]>{progress_label}[/bold cyan]").strip()
             
             if not user_input:
                 console.print("[yellow]Please provide an answer.[/yellow]")
@@ -1167,7 +1182,21 @@ START by creating `phases/_CONTEXT.md`, then `phases/_INDEX.md`, then each phase
     done = asyncio.Event()
     
     def on_event(event):
-        if event.type.value == "session.idle":
+        if event.type.value == "tool.execution_start":
+            tool_name = getattr(event.data, 'tool_name', None)
+            args = getattr(event.data, 'arguments', None)
+            if tool_name == "create" and args:
+                file_path = args.get('path', '') if isinstance(args, dict) else ''
+                if file_path:
+                    log(f"Creating {Path(file_path).name}...", "INFO")
+        elif event.type.value == "tool.execution_complete":
+            tool_name = getattr(event.data, 'tool_name', None)
+            args = getattr(event.data, 'arguments', None)
+            if tool_name == "create" and args:
+                file_path = args.get('path', '') if isinstance(args, dict) else ''
+                if file_path:
+                    log(f"Created {Path(file_path).name} ✓", "OK")
+        elif event.type.value == "session.idle":
             done.set()
     
     session.on(on_event)
@@ -1265,7 +1294,21 @@ START by creating `phases/_CONTEXT.md`, then `phases/_INDEX.md`, then each phase
     done = asyncio.Event()
     
     def on_event(event):
-        if event.type.value == "session.idle":
+        if event.type.value == "tool.execution_start":
+            tool_name = getattr(event.data, 'tool_name', None)
+            args = getattr(event.data, 'arguments', None)
+            if tool_name == "create" and args:
+                file_path = args.get('path', '') if isinstance(args, dict) else ''
+                if file_path:
+                    log(f"Creating {Path(file_path).name}...", "INFO")
+        elif event.type.value == "tool.execution_complete":
+            tool_name = getattr(event.data, 'tool_name', None)
+            args = getattr(event.data, 'arguments', None)
+            if tool_name == "create" and args:
+                file_path = args.get('path', '') if isinstance(args, dict) else ''
+                if file_path:
+                    log(f"Created {Path(file_path).name} ✓", "OK")
+        elif event.type.value == "session.idle":
             done.set()
     
     session.on(on_event)
