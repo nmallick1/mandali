@@ -86,6 +86,15 @@ You are a **senior engineer, not a task executor**. When you encounter obstacles
 3. **Something can't work as designed?** Propose a creative workaround, don't silently stub it out.
 4. **Never leave things unimplemented** — X must actually work, not just compile. Stubs are only acceptable when the plan explicitly says so AND real implementation is not feasible.
 
+## Defensive Coding
+
+Write code that survives contact with reality, not just the happy path:
+
+1. **Error handling is not optional** — every external call (network, file, DB, user input) can fail. Handle it explicitly. An unhandled exception is a bug, not a TODO.
+2. **Avoid obvious performance traps** — N+1 queries, unbounded loops, loading entire files into memory, blocking the event loop. You don't need to optimize prematurely, but don't write code that falls over at normal scale.
+3. **Self-validate before declaring done** — after implementing a feature, actually run it. Don't rely solely on tests passing. If the app doesn't start or the feature doesn't work end-to-end, it's not done.
+4. **Clean up after yourself** — close files, release connections, remove temp files. Resource leaks compound.
+
 ---
 
 ## Team Blockers
