@@ -2928,17 +2928,16 @@ Begin by reviewing the gaps and the codebase, then work to close them.
                 is_final_round=(max_retries == 0)
             )
             
-            # Stop agents before verification — fresh agents get a fresh look on relaunch
-            await orchestrator.stop_agents()
-            
             if not success:
+                await orchestrator.stop_agents()
                 break  # Human aborted or unrecoverable
             
             # Skip verification if disabled
             if max_retries == 0:
+                await orchestrator.stop_agents()
                 break
             
-            # Run verification
+            # Run verification — agents stay alive in case they're needed for handoff
             orchestrator.metrics.verification_rounds += 1
             passed, gap_report = await run_verification(
                 orchestrator.client, orchestrator.model, workspace, plan_content
@@ -2946,10 +2945,9 @@ Begin by reviewing the gaps and the codebase, then work to close them.
             
             if passed:
                 orchestrator.metrics.verification_passed = True
-                # Announce final victory — verification has confirmed the implementation
                 await orchestrator.announce_victory(workspace, is_final=True)
                 
-                # Generate handoff instructions for the user
+                # Agents are still alive — ask for handoff while they have full context
                 handoff_content = await generate_handoff(
                     orchestrator.client, orchestrator.model,
                     workspace, plan_content, prompt_context or ""
@@ -2961,8 +2959,12 @@ Begin by reviewing the gaps and the codebase, then work to close them.
                         border_style="green"
                     ))
                 
+                await orchestrator.stop_agents()
                 await asyncio.sleep(5)
                 break
+            
+            # Verification failed — stop agents, fresh launch gets a fresh look
+            await orchestrator.stop_agents()
             
             # Gaps found — check if we have more rounds
             if is_final_round:
