@@ -2928,16 +2928,17 @@ Begin by reviewing the gaps and the codebase, then work to close them.
                 is_final_round=(max_retries == 0)
             )
             
+            # Stop agents before verification — fresh agents get a fresh look on relaunch
+            await orchestrator.stop_agents()
+            
             if not success:
-                await orchestrator.stop_agents()
                 break  # Human aborted or unrecoverable
             
             # Skip verification if disabled
             if max_retries == 0:
-                await orchestrator.stop_agents()
                 break
             
-            # Run verification (agents still alive — they may need to fix gaps)
+            # Run verification
             orchestrator.metrics.verification_rounds += 1
             passed, gap_report = await run_verification(
                 orchestrator.client, orchestrator.model, workspace, plan_content
@@ -2961,7 +2962,6 @@ Begin by reviewing the gaps and the codebase, then work to close them.
                     ))
                 
                 await asyncio.sleep(5)
-                await orchestrator.stop_agents()
                 break
             
             # Gaps found — check if we have more rounds
@@ -2975,11 +2975,7 @@ Remaining gaps:
 
 Human review recommended.
 """)
-                await orchestrator.stop_agents()
                 break
-            
-            # Stop agents before relaunching for next round
-            await orchestrator.stop_agents()
             
             # Archive and reset for next round
             log(f"Preparing for round {round_number + 1}...", "INFO")
