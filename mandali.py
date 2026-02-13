@@ -3192,8 +3192,15 @@ class AutonomousOrchestrator:
     
     async def start(self):
         log("Starting Copilot client...", "INFO")
-        self._cli_path = get_copilot_cli_path()
-        log(f"Using CLI at: {self._cli_path}", "INFO")
+        # Let SDK use its bundled CLI binary (most reliable).
+        # Fall back to explicit path only if COPILOT_CLI_PATH is set.
+        env_path = os.environ.get("COPILOT_CLI_PATH")
+        if env_path:
+            self._cli_path = env_path
+            log(f"Using CLI at: {self._cli_path}", "INFO")
+        else:
+            self._cli_path = None
+            log("Using SDK bundled CLI", "INFO")
         await self._connect_with_retry()
         log("Copilot client ready", "OK")
     
@@ -3201,7 +3208,10 @@ class AutonomousOrchestrator:
         """Connect to Copilot CLI with retry logic for transient failures."""
         last_error = None
         for attempt in range(1, max_retries + 1):
-            self.client = CopilotClient({"cli_path": self._cli_path})
+            if self._cli_path:
+                self.client = CopilotClient({"cli_path": self._cli_path})
+            else:
+                self.client = CopilotClient()
             try:
                 await self.client.start()
                 return
@@ -4273,6 +4283,30 @@ async def async_main(args):
             ))
             return 1
         
+        # Initialize Teams integration if enabled
+        if args.teams:
+            try:
+                from teams_bridge import TeamsRelayBridge, load_relay_config
+                
+                relay_config = load_relay_config()
+                if not relay_config:
+                    console.print("[red]Teams integration requires relay_url and api_key in ~/.copilot/mandali-teams.json[/red]")
+                    console.print("Run --setup-teams first, or add relay_url and api_key to the config.")
+                    return 1
+                
+                orchestrator.teams_bridge = TeamsRelayBridge(
+                    relay_url=relay_config["relay_url"],
+                    api_key=relay_config["api_key"],
+                )
+                await orchestrator.teams_bridge.start()
+                log(f"Teams relay connected: {orchestrator.teams_bridge.public_url}", "OK")
+            except ImportError:
+                console.print("[red]Teams integration requires teams_bridge.py and websockets package[/red]")
+                return 1
+            except Exception as e:
+                console.print(f"[red]Failed to start Teams bridge: {e}[/red]")
+                return 1
+        
         # Get plan content
         out_path = args.out_path.resolve()
         out_path.mkdir(parents=True, exist_ok=True)
@@ -4422,6 +4456,42 @@ async def async_main(args):
         log(f"Workspace: {workspace.path}", "INFO")
         log(f"Artifacts: {workspace.artifacts_path}", "INFO")
         
+        # Create Teams thread for this run if enabled
+        if orchestrator.teams_bridge:
+            try:
+                plan_name = args.plan if args.plan else "Mandali Run"
+                if hasattr(plan_name, 'name'):
+                    plan_name = plan_name.name
+                orchestrator.teams_thread_id = await orchestrator.teams_bridge.create_thread(
+                    f"🚀 Mandali started: {plan_name}\n\n"
+                    f"Agents: Dev, Security, PM, QA, SRE\n"
+                    f"Workspace: {workspace.path}\n"
+                    f"Reply in this thread to provide guidance."
+                )
+                log(f"Teams thread created", "OK")
+                
+                # Register reply callback that injects into conversation
+                def on_teams_reply(thread_id: str, text: str):
+                    # Accept messages from any thread (relay mode)
+                    append_to_conversation(workspace, "HUMAN", f"""
+@AllAgents - Human guidance (via Teams):
+
+{text}
+
+Please continue based on this guidance.
+""")
+                    log(f"Teams reply injected: {text[:80]}...", "TEAMS")
+                    orchestrator._teams_reply_received = True
+                    # Track the real thread_id for replies back
+                    if orchestrator.teams_thread_id in (None, "__default__"):
+                        orchestrator.teams_thread_id = thread_id
+                
+                orchestrator.teams_bridge.set_reply_callback(on_teams_reply)
+            except Exception as e:
+                log(f"Failed to create Teams thread: {e}", "WARN")
+                # Continue without Teams - not fatal
+        
+
         # Determine plan location description for agents
         if workspace.is_phased_plan():
             plan_location = f"""
@@ -4845,6 +4915,396 @@ def show_persona_description(persona_id: str):
     console.print()
 
 
+def run_teams_setup() -> int:
+    """
+    Interactive one-time setup for Teams integration.
+    
+    Architecture: Cloud relay on Azure App Service with MSI auth.
+    - Creates: Resource Group, User-Assigned MSI, Azure Bot, App Service (relay)
+    - Deploys relay code, enables WebSockets, assigns MSI
+    - Builds Teams app package (ZIP for sideloading)
+    - Saves local config (relay_url + api_key)
+    
+    No dev tunnels, no app passwords, no local server needed.
+    """
+    import secrets
+    import shutil
+    import subprocess
+    import zipfile
+    
+    # Force UTF-8 output on Windows to avoid Rich legacy renderer issues
+    if sys.platform == "win32":
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    
+    console = Console()
+    console.print("\n[bold cyan]Mandali Teams Setup[/bold cyan]")
+    console.print("=" * 50)
+    console.print("This will create Azure resources and deploy a cloud relay.\n")
+    console.print("Architecture: Teams -> Bot Service -> Cloud Relay <-WebSocket-> mandali")
+    console.print("No dev tunnels. No local server. No app passwords.\n")
+    
+    # Helper: on Windows, subprocess needs shell=True for .cmd files like az
+    def run_az(args_list, **kwargs):
+        """Run az CLI command, handling Windows .cmd wrapper."""
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        kwargs.setdefault("timeout", 120)
+        if sys.platform == "win32":
+            kwargs["shell"] = True
+            return subprocess.run(["az"] + args_list, **kwargs)
+        return subprocess.run(["az"] + args_list, **kwargs)
+    
+    # --- Step 1: Check prerequisites ---
+    console.print("[bold]Step 1/6: Checking prerequisites...[/bold]")
+    
+    # Check az CLI
+    az_path = shutil.which("az") or shutil.which("az.cmd")
+    if not az_path:
+        console.print("[red]✗ Azure CLI (az) not found.[/red]")
+        console.print("  Install: winget install Microsoft.AzureCLI")
+        console.print("  Then: az login")
+        return 1
+    
+    # Check az is logged in
+    try:
+        result = run_az(["account", "show", "--query", "{name:name, id:id, tenantId:tenantId}", "-o", "json"], timeout=30)
+        if result.returncode != 0:
+            console.print("[red]✗ Azure CLI not logged in.[/red]")
+            console.print("  Run: az login")
+            return 1
+        account_info = json.loads(result.stdout)
+        subscription_name = account_info.get("name", "Unknown")
+        subscription_id = account_info.get("id", "")
+        tenant_id = account_info.get("tenantId", "")
+        console.print(f"  [green]✓[/green] Azure CLI logged in")
+        console.print(f"    Subscription: {subscription_name}")
+        console.print(f"    Tenant: {tenant_id}")
+    except subprocess.TimeoutExpired:
+        console.print("[red]✗ Azure CLI timed out. Try running 'az account show' manually.[/red]")
+        return 1
+    
+    # Check relay directory exists
+    relay_dir = Path(__file__).parent / "relay"
+    if not (relay_dir / "app.py").exists():
+        console.print(f"[red]✗ Relay code not found at {relay_dir}[/red]")
+        console.print("  The relay/ directory should be in the mandali repo.")
+        return 1
+    console.print(f"  [green]✓[/green] Relay code found at {relay_dir}")
+    
+    console.print()
+    
+    # Check if already configured
+    config_path = Path.home() / ".copilot" / "mandali-teams.json"
+    if config_path.exists():
+        existing = json.loads(config_path.read_text(encoding="utf-8"))
+        console.print(f"[yellow]⚠ Existing config found at {config_path}[/yellow]")
+        console.print(f"  Relay URL: {existing.get('relay_url', 'N/A')}")
+        response = input("  Overwrite and create new resources? (y/N): ").strip().lower()
+        if response != "y":
+            console.print("Setup cancelled.")
+            return 0
+        console.print()
+    
+    # Generate unique suffix for resource names
+    suffix = secrets.token_hex(3)  # 6 hex chars
+    resource_group = "mandali-relay-rg"
+    msi_name = f"mandali-bot-id-{suffix}"
+    bot_name = f"mandali-bot-{suffix}"
+    app_name = f"mandali-relay-{suffix}"
+    plan_name = "mandali-relay-plan"
+    location = "centralus"
+    ws_api_key = secrets.token_hex(16)
+    
+    console.print(f"  Resource names: bot=[cyan]{bot_name}[/cyan], app=[cyan]{app_name}[/cyan]")
+    console.print()
+    
+    # --- Step 2: Create Azure resources ---
+    console.print("[bold]Step 2/6: Creating Azure resources...[/bold]")
+    
+    # 2a. Resource group (idempotent)
+    console.print("  Creating resource group...")
+    result = run_az(["group", "create", "--name", resource_group, "--location", location, "-o", "none"])
+    if result.returncode != 0:
+        console.print(f"[red]✗ Failed to create resource group: {result.stderr}[/red]")
+        return 1
+    console.print(f"  [green]✓[/green] Resource group: {resource_group}")
+    
+    # 2b. User-Assigned Managed Identity
+    console.print("  Creating managed identity...")
+    result = run_az([
+        "identity", "create",
+        "--name", msi_name,
+        "--resource-group", resource_group,
+        "--location", location,
+        "--query", "{clientId:clientId, id:id}",
+        "-o", "json",
+    ])
+    if result.returncode != 0:
+        # May already exist — try to get it
+        result = run_az([
+            "identity", "show",
+            "--name", msi_name,
+            "--resource-group", resource_group,
+            "--query", "{clientId:clientId, id:id}",
+            "-o", "json",
+        ])
+        if result.returncode != 0:
+            console.print(f"[red]✗ Failed to create/get MSI: {result.stderr}[/red]")
+            return 1
+    
+    msi_info = json.loads(result.stdout)
+    msi_client_id = msi_info["clientId"]
+    msi_resource_id = msi_info["id"]
+    console.print(f"  [green]✓[/green] MSI: {msi_name} (client ID: {msi_client_id[:8]}...)")
+    
+    # 2c. Azure Bot with UserAssignedMSI
+    console.print("  Creating Azure Bot...")
+    result = run_az([
+        "bot", "create",
+        "--name", bot_name,
+        "--resource-group", resource_group,
+        "--app-type", "UserAssignedMSI",
+        "--appid", msi_client_id,
+        "--tenant-id", tenant_id,
+        "--msi-resource-id", msi_resource_id,
+        "--sku", "F0",
+    ])
+    if result.returncode != 0:
+        console.print(f"[red]✗ Failed to create bot: {result.stderr}[/red]")
+        return 1
+    console.print(f"  [green]✓[/green] Azure Bot: {bot_name}")
+    
+    # 2d. Add Teams channel
+    console.print("  Adding Teams channel...")
+    result = run_az([
+        "bot", "msteams", "create",
+        "--name", bot_name,
+        "--resource-group", resource_group,
+    ])
+    if result.returncode != 0:
+        console.print(f"[yellow]⚠ Teams channel may need manual setup: {result.stderr}[/yellow]")
+    else:
+        console.print(f"  [green]✓[/green] Teams channel added")
+    
+    console.print()
+    
+    # --- Step 3: Deploy relay to App Service ---
+    console.print("[bold]Step 3/6: Deploying relay to App Service...[/bold]")
+    
+    # 3a. Create App Service Plan
+    console.print("  Creating App Service Plan (B1 Linux)...")
+    result = run_az([
+        "appservice", "plan", "create",
+        "--name", plan_name,
+        "--resource-group", resource_group,
+        "--sku", "B1",
+        "--is-linux",
+        "--location", location,
+        "-o", "none",
+    ])
+    if result.returncode != 0:
+        # May already exist
+        if "already exists" not in result.stderr.lower() and "conflict" not in result.stderr.lower():
+            console.print(f"[red]✗ Failed to create plan: {result.stderr}[/red]")
+            return 1
+    console.print(f"  [green]✓[/green] Plan: {plan_name}")
+    
+    # 3b. Create Web App
+    console.print("  Creating Web App...")
+    result = run_az([
+        "webapp", "create",
+        "--name", app_name,
+        "--resource-group", resource_group,
+        "--plan", plan_name,
+        "--runtime", "PYTHON:3.11",
+        "-o", "none",
+    ])
+    if result.returncode != 0:
+        console.print(f"[red]✗ Failed to create webapp: {result.stderr}[/red]")
+        return 1
+    console.print(f"  [green]✓[/green] Web App: {app_name}")
+    
+    # 3c. Enable WebSockets
+    console.print("  Enabling WebSockets...")
+    run_az([
+        "webapp", "config", "set",
+        "--name", app_name,
+        "--resource-group", resource_group,
+        "--web-sockets-enabled", "true",
+        "-o", "none",
+    ])
+    console.print(f"  [green]✓[/green] WebSockets enabled")
+    
+    # 3d. Assign MSI to the Web App
+    console.print("  Assigning managed identity...")
+    result = run_az([
+        "webapp", "identity", "assign",
+        "--name", app_name,
+        "--resource-group", resource_group,
+        "--identities", msi_resource_id,
+        "-o", "none",
+    ])
+    if result.returncode != 0:
+        console.print(f"[yellow]⚠ MSI assignment warning: {result.stderr}[/yellow]")
+    else:
+        console.print(f"  [green]✓[/green] MSI assigned to Web App")
+    
+    # 3e. Set environment variables
+    console.print("  Configuring environment variables...")
+    result = run_az([
+        "webapp", "config", "appsettings", "set",
+        "--name", app_name,
+        "--resource-group", resource_group,
+        "--settings",
+        f"MICROSOFT_APP_ID={msi_client_id}",
+        f"MICROSOFT_APP_TENANT_ID={tenant_id}",
+        f"WS_API_KEY={ws_api_key}",
+        "WEBSITES_CONTAINER_START_TIME_LIMIT=300",
+        "-o", "none",
+    ])
+    if result.returncode != 0:
+        console.print(f"[red]✗ Failed to set app settings: {result.stderr}[/red]")
+        return 1
+    console.print(f"  [green]✓[/green] Environment configured")
+    
+    # 3f. Set startup command (pip install at startup since zip deploy skips Oryx build)
+    console.print("  Setting startup command...")
+    startup_cmd = "pip install -r /home/site/wwwroot/requirements.txt && gunicorn app:app --bind 0.0.0.0:8000 --worker-class uvicorn.workers.UvicornWorker --timeout 120"
+    run_az([
+        "webapp", "config", "set",
+        "--name", app_name,
+        "--resource-group", resource_group,
+        "--startup-file", startup_cmd,
+        "-o", "none",
+    ])
+    console.print(f"  [green]✓[/green] Startup command set")
+    
+    # 3g. Deploy relay code via zip deploy
+    console.print("  Deploying relay code (this may take a minute)...")
+    
+    # Create a temporary zip of the relay directory
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        deploy_zip_path = tmp.name
+    
+    try:
+        with zipfile.ZipFile(deploy_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in relay_dir.iterdir():
+                if f.is_file() and f.name not in ("test_local.py", ".gitignore") and not f.name.startswith("."):
+                    zf.write(f, f.name)
+        
+        result = run_az([
+            "webapp", "deploy",
+            "--name", app_name,
+            "--resource-group", resource_group,
+            "--src-path", deploy_zip_path,
+            "--type", "zip",
+            "--timeout", "600",
+        ], timeout=600)
+        
+        if result.returncode != 0:
+            console.print(f"[red]✗ Deploy failed: {result.stderr}[/red]")
+            return 1
+        
+        console.print(f"  [green]✓[/green] Relay deployed to https://{app_name}.azurewebsites.net")
+        console.print(f"  [dim](First startup takes ~2 min for pip install)[/dim]")
+    finally:
+        try:
+            os.unlink(deploy_zip_path)
+        except OSError:
+            pass
+    
+    console.print()
+    
+    # --- Step 4: Set bot messaging endpoint ---
+    console.print("[bold]Step 4/6: Configuring bot endpoint...[/bold]")
+    
+    endpoint = f"https://{app_name}.azurewebsites.net/api/messages"
+    result = run_az([
+        "bot", "update",
+        "--name", bot_name,
+        "--resource-group", resource_group,
+        "--endpoint", endpoint,
+    ])
+    if result.returncode != 0:
+        console.print(f"[yellow]⚠ Could not set endpoint automatically: {result.stderr}[/yellow]")
+        console.print(f"  Set it manually in Azure Portal to: {endpoint}")
+    else:
+        console.print(f"  [green]✓[/green] Bot endpoint: {endpoint}")
+    
+    console.print()
+    
+    # --- Step 5: Save local config ---
+    console.print("[bold]Step 5/6: Saving configuration...[/bold]")
+    
+    relay_config = {
+        "relay_url": f"wss://{app_name}.azurewebsites.net/ws",
+        "api_key": ws_api_key,
+        "bot_name": bot_name,
+        "app_name": app_name,
+        "resource_group": resource_group,
+        "msi_client_id": msi_client_id,
+        "tenant_id": tenant_id,
+    }
+    
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(relay_config, indent=2), encoding="utf-8")
+    
+    # Set restrictive permissions on Unix
+    if sys.platform != "win32":
+        os.chmod(config_path, 0o600)
+    
+    console.print(f"  [green]✓[/green] Config saved to {config_path}")
+    console.print()
+    
+    # --- Step 6: Build Teams app package ---
+    console.print("[bold]Step 6/6: Building Teams app package...[/bold]")
+    
+    teams_app_dir = Path(__file__).parent / "teams-app"
+    manifest_path = teams_app_dir / "manifest.json"
+    
+    if not manifest_path.exists():
+        console.print(f"[red]✗ Manifest not found at {manifest_path}[/red]")
+        return 1
+    
+    # Template the manifest with MSI client ID (used as bot App ID)
+    manifest = manifest_path.read_text(encoding="utf-8")
+    manifest = manifest.replace("{{APP_ID}}", msi_client_id)
+    
+    # Create ZIP
+    zip_path = teams_app_dir / "mandali-bot.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", manifest)
+        for icon in ["color.png", "outline.png"]:
+            icon_path = teams_app_dir / icon
+            if icon_path.exists():
+                zf.write(icon_path, icon)
+    
+    console.print(f"  [green]✓[/green] App package: {zip_path}")
+    console.print()
+    
+    # --- Done! ---
+    console.print("[bold green]✓ Setup complete![/bold green]")
+    console.print()
+    console.print("[bold]One manual step remaining:[/bold]")
+    console.print(f"  1. Open Microsoft Teams")
+    console.print(f"  2. Apps → Manage your apps → Upload a custom app")
+    console.print(f"  3. Select: [cyan]{zip_path}[/cyan]")
+    console.print(f"  4. Add the bot to your team/channel")
+    console.print(f"  5. Send @Mandali any message to initialize the connection")
+    console.print()
+    console.print("[bold]Then run:[/bold]")
+    console.print(f"  mandali --plan <your-plan> --out-path <output-dir> --teams")
+    console.print()
+    console.print(f"[dim]Relay URL: wss://{app_name}.azurewebsites.net/ws[/dim]")
+    console.print(f"[dim]Monthly cost: ~$13 (App Service B1). Free tier doesn't support WebSockets.[/dim]")
+    console.print(f"[dim]To tear down: az group delete --name {resource_group} --yes[/dim]")
+    console.print()
+    
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Mandali — assembles the right team for any task, then makes them argue about it until the work is actually good",
@@ -4906,6 +5366,10 @@ Example: python mandali.py --describe dev
     parser.add_argument('--domains', type=str, default=None,
                         help='Comma-separated domain list (e.g., analytics,writing). Overrides classifier. '
                              'Infers task_type: no "software-development" → non-software, "software-development" present → mixed.')
+    parser.add_argument('--teams', action='store_true', default=False,
+                        help='Enable Teams integration for notifications and remote replies')
+    parser.add_argument('--setup-teams', action='store_true', default=False,
+                        help='One-time setup: provision Azure Bot + cloud relay for Teams integration')
     
     args = parser.parse_args()
     
@@ -4916,6 +5380,11 @@ Example: python mandali.py --describe dev
     if args.describe:
         show_persona_description(args.describe)
         sys.exit(0)
+    
+    # Handle --setup-teams
+    if args.setup_teams:
+        exit_code = run_teams_setup()
+        sys.exit(exit_code)
     
     # Validate required args for run mode
     if not args.out_path:
