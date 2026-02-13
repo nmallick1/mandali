@@ -538,6 +538,65 @@ Focus on whether the **end goal** was achieved. Implementation creativity is val
         return True, ""
 # ============================================================================
 
+
+async def generate_handoff(
+    client: CopilotClient,
+    model: str,
+    workspace: Workspace,
+    plan_content: str,
+    user_prompt: str
+) -> str:
+    """Generate user-facing handoff instructions after successful completion."""
+    log("📋 Generating handoff instructions...", "INFO")
+    
+    session = await client.create_session({
+        "model": model,
+        "system_message": HANDOFF_PROMPT,
+        "working_directory": str(workspace.path)
+    })
+    
+    prompt = f"""The user's original request:
+{user_prompt}
+
+The plan that was implemented:
+{plan_content[:3000]}
+
+The workspace is at: {workspace.path}
+
+Write a HANDOFF.md document with instructions for the user on how to use what was created.
+Focus on what the user needs to know — not how it was built.
+"""
+    
+    response_parts = []
+    done = asyncio.Event()
+    
+    def on_event(event):
+        if event.type.value == "assistant.message":
+            response_parts.append(event.data.content)
+        elif event.type.value == "session.idle":
+            done.set()
+    
+    session.on(on_event)
+    try:
+        await session.send({"prompt": prompt})
+        await done.wait()
+    finally:
+        await session.destroy()
+    
+    content = ''.join(response_parts)
+    
+    if content.strip():
+        handoff_file = workspace.path / "HANDOFF.md"
+        handoff_file.write_text(content, encoding='utf-8')
+        log(f"Handoff instructions saved to {handoff_file}", "OK")
+        return content
+    
+    log("Handoff generation produced no content", "WARN")
+    return ""
+
+
+# ============================================================================
+
 async def run_autonomous_agent(
     client: CopilotClient,
     agent: PersonaAgent,
@@ -832,6 +891,25 @@ Then output JSON:
   "implicit_requirements": ["..."]
 }}
 ```
+"""
+
+HANDOFF_PROMPT = """You are producing a HANDOFF document for the user who requested this work.
+
+The team has finished the task. Your job: write clear, concise instructions so the user knows how to USE what was created. This is NOT a technical summary for developers — it's a guide for the person who asked for this work.
+
+## Rules:
+- Start with a brief summary of what was built/created (1-2 sentences)
+- Provide step-by-step instructions to get started (how to launch, open, run, read, etc.)
+- Include any prerequisites (dependencies, environment setup, etc.)
+- Highlight key features or sections the user should know about
+- If there are known limitations or next steps, mention them briefly
+- Adapt your tone to the task type:
+  - Code: "How to run and use this application"
+  - Analysis: "How to read this analysis and what the findings mean"
+  - Writing: "Overview of what was produced and how to use it"
+  - Research: "Summary of findings and how to navigate the deliverables"
+- Keep it practical — the user wants to USE the output, not understand how it was built
+- Do NOT use tools. Respond with the document content only.
 """
 
 PLAN_GENERATOR_PROMPT = """You are a plan generator that creates PHASED IMPLEMENTATION PLANS as SEPARATE FILES.
@@ -2850,17 +2928,16 @@ Begin by reviewing the gaps and the codebase, then work to close them.
                 is_final_round=(max_retries == 0)
             )
             
-            # Stop agents before verification or exit
-            await orchestrator.stop_agents()
-            
             if not success:
+                await orchestrator.stop_agents()
                 break  # Human aborted or unrecoverable
             
             # Skip verification if disabled
             if max_retries == 0:
+                await orchestrator.stop_agents()
                 break
             
-            # Run verification
+            # Run verification (agents still alive — they may need to fix gaps)
             orchestrator.metrics.verification_rounds += 1
             passed, gap_report = await run_verification(
                 orchestrator.client, orchestrator.model, workspace, plan_content
@@ -2870,7 +2947,21 @@ Begin by reviewing the gaps and the codebase, then work to close them.
                 orchestrator.metrics.verification_passed = True
                 # Announce final victory — verification has confirmed the implementation
                 await orchestrator.announce_victory(workspace, is_final=True)
+                
+                # Generate handoff instructions for the user
+                handoff_content = await generate_handoff(
+                    orchestrator.client, orchestrator.model,
+                    workspace, plan_content, prompt_context or ""
+                )
+                if handoff_content:
+                    console.print(Panel(
+                        escape(handoff_content[:3000]),
+                        title="📋 HANDOFF — How to Use Your Deliverable",
+                        border_style="green"
+                    ))
+                
                 await asyncio.sleep(5)
+                await orchestrator.stop_agents()
                 break
             
             # Gaps found — check if we have more rounds
@@ -2884,7 +2975,11 @@ Remaining gaps:
 
 Human review recommended.
 """)
+                await orchestrator.stop_agents()
                 break
+            
+            # Stop agents before relaunching for next round
+            await orchestrator.stop_agents()
             
             # Archive and reset for next round
             log(f"Preparing for round {round_number + 1}...", "INFO")
