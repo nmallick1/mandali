@@ -154,6 +154,8 @@ python mandali.py [OPTIONS]
 | `--max-retries <n>` | No (default: 5) | Max verification rounds after all agents SATISFIED. Set 0 to disable |
 | `--verbose` | No | Show detailed status updates |
 | `--describe <persona>` | No | Show detailed description of a persona (dev, security, pm, qa, sre) |
+| `--teams` | No | Enable Teams integration for notifications and remote replies |
+| `--setup-teams` | No | One-time setup: provision Azure Bot + cloud relay for Teams integration |
 
 ### Examples
 
@@ -421,6 +423,65 @@ Agents acknowledge, update status to WORKING/SATISFIED, and continue.
 
 ---
 
+## Teams Integration
+
+Monitor agent progress and provide guidance from Microsoft Teams — no terminal required.
+
+### Quick Setup
+
+```bash
+# 1. Provision Azure resources (Bot, Relay, MSI) — ~3 minutes
+mandali --setup-teams
+
+# 2. Upload the generated ZIP to Teams
+#    Go to Teams Admin Center → Manage Apps → Upload → mandali-bot.zip
+
+# 3. Run with Teams enabled
+mandali --plan phases/_INDEX.md --out-path ./output --teams
+```
+
+### How It Works
+
+```
+Teams ──→ Azure Bot Service ──→ Cloud Relay (App Service) ──→ WebSocket ──→ Mandali
+  ←── reply ←── relay ←── WebSocket ←── agents post updates
+```
+
+1. You message the Mandali bot in Teams
+2. Azure Bot Service routes the message to the cloud relay
+3. The relay forwards it over WebSocket to your running Mandali instance
+4. Your message is injected into `conversation.txt` as `@HUMAN` guidance
+5. Agent responses are posted back to your Teams thread
+
+### What `--setup-teams` Provisions
+
+| Resource | SKU | Cost |
+|----------|-----|------|
+| Azure Bot | F0 (free) | Free |
+| App Service (relay) | B1 Linux | ~$13/mo |
+| User-Assigned MSI | — | Free |
+
+### Configuration
+
+Config is saved to `~/.copilot/mandali-teams.json`:
+
+```json
+{
+  "relay_url": "wss://mandali-relay-XXXXXX.azurewebsites.net/ws",
+  "api_key": "auto-generated-key",
+  "bot_name": "mandali-bot-XXXXXX",
+  "app_name": "mandali-relay-XXXXXX",
+  "resource_group": "mandali-relay-rg"
+}
+```
+
+### Requirements
+
+- Azure CLI (`az`) authenticated with an active subscription
+- Permission to create Azure Bot and App Service resources
+
+---
+
 ## Prior Art Acknowledgment
 
 This system implements the **multi-agent collaborative development pattern**, which is an established approach in AI research. Key prior art includes:
@@ -498,6 +559,7 @@ Our contribution is **practical refinements for production/unsupervised use**:
 ```
 mandali/                           # Mandali source
 ├── mandali.py                     # Autonomous orchestrator
+├── teams_bridge.py                # Teams WebSocket client
 ├── config.yaml                    # Personas, model, settings
 ├── PRIOR_ART.md                   # Framework comparison
 ├── DecisionsTracker.md            # Deviation log template
@@ -507,6 +569,15 @@ mandali/                           # Mandali source
 │   ├── pm.persona.md
 │   ├── qa.persona.md
 │   └── sre.persona.md
+├── relay/                         # Cloud relay (deployed to Azure)
+│   ├── app.py                     # FastAPI endpoints
+│   ├── bot_handler.py             # Bot Framework adapter
+│   ├── ws_manager.py              # WebSocket connection manager
+│   ├── config.py                  # Environment config
+│   ├── utils.py                   # Message sanitization
+│   ├── requirements.txt           # Relay dependencies
+│   └── startup.sh                 # Gunicorn startup
+└── teams-app/                     # Teams app manifest template
 
 # When --out-path is inside a git repo (worktree isolation):
 myproject/                         # Your repo (UNTOUCHED)
