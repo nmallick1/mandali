@@ -7,7 +7,7 @@ name = "mandali"
 version = "0.1.0"
 description = "Mandali (मंडली) — Autonomous multi-agent collaborative development system using GitHub Copilot SDK"
 readme = "README.md"
-license = "MIT"
+license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     { name = "nmallick1" },
