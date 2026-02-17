@@ -1,44 +1,52 @@
 # Prior Art & Framework Comparison
 
-This document acknowledges the prior art that influenced Mandali's autonomous multi-agent collaboration system and explains how Mandali's approach addresses known limitations in existing frameworks.
+This document acknowledges the prior art that influenced Mandali and explains how its approach addresses known limitations in existing multi-agent frameworks.
 
 ---
 
-## Mandali's Approach: Autonomous Multi-Agent Collaboration
+## Mandali's Approach
 
-### Architecture Summary
+Mandali is an autonomous multi-agent system built around one core idea: **the people who build something should not be the same people who judge it.** Every domain in a task gets both a builder and a challenger. Quality comes from structured disagreement, not from asking one agent to both produce and evaluate its own work.
 
-| Component | Description |
-|-----------|-------------|
-| **5 Specialized Personas** | Dev, Security, PM, QA, SRE - domain experts with veto power |
-| **Passive Orchestrator** | Monitors conversation, handles timing/nudges, bridges human input |
-| **LLM-Based Artifact Discovery** | Recursively discovers plan files from prompt/plan refs (5 levels deep) |
-| **Phased Plan Structure** | `_CONTEXT.md`, `_INDEX.md`, `phase-*.md` files for context-preserving plans |
-| **Hybrid Conversation Model** | Orchestrator writes (prevents race conditions), agents read directly via tools |
-| **File-Based State** | `conversation.txt`, `satisfaction.txt`, `DecisionsTracker.md` (deviation log) |
-| **Real Tool Integration** | Agents use Copilot CLI with actual dev tools + MCP servers |
+The team itself isn't fixed. Mandali reads the task, identifies which domains need expertise, and assembles a team to match. A code task gets the hand-tuned static team (Dev, Security, PM, QA, SRE). A data analysis task gets domain analysts, methodology reviewers, and a cross-domain coordinator. A mixed task gets both. The adversarial structure — builders paired with challengers — applies regardless of what the task is.
+
+### Architecture
+
+| Layer | Description |
+|-------|-------------|
+| **Team Assembly** | Static code team (5 hand-tuned personas) or dynamically generated experts, assembled per-task based on domain classification |
+| **Adversarial Roles** | Doer (builder), Critic (challenger), Scope-keeper (cross-domain coherence) — every domain gets at least the first two |
+| **Passive Orchestrator** | Monitors conversation, handles timing/nudges, bridges human input — does not direct work |
+| **Phased Plan Structure** | `_CONTEXT.md` (global context), `_INDEX.md` (tracking), `phase-*.md` (per-phase tasks) |
+| **Hybrid Conversation** | Orchestrator writes on behalf of agents (prevents race conditions), agents read directly via tools (true autonomy) |
+| **File-Based State** | `conversation.txt`, `satisfaction.txt`, `DecisionsTracker.md` — all state persisted, agents can crash and resume |
+| **Real Tooling** | Agents use Copilot CLI with actual dev tools, MCP servers, and user-installed skills |
+| **Artifact Discovery** | LLM recursively discovers plan files from prompt/plan references (5 levels deep) |
 
 ### Workflow
 ```
 Default (direct launch):
   --plan or --prompt → LLM extracts file paths → Recursive artifact discovery (5 levels)
-  → Copy to workspace → User confirms → Launch agents
+  → Copy to workspace → User confirms → Launch team
 
 Opt-in (--generate-plan):
-  AI interviews human → Generates phased plan → User approve → Review → Launch agents
+  AI interviews human → Classifies task → Assembles team → Generates phased plan
+  → User approves → Launch team
 
-Phase 0A: Context Building (agents explore codebase with background agents)
-Phase 0B: Design Discussion (all agents agree on approach before implementation)
-Phase 1+: TDD+PoC Implementation with iterative validation per phase
+Phase 0A: Context Building (agents explore codebase and materials)
+Phase 0B: Design Discussion (adversarial review — team agrees on approach before execution)
+Phase 1+: Execution with iterative validation per phase
 ```
 
-### Key Design Principles
+### Design Principles
 
-1. **Consensus Before Code** - Mandatory design discussion phase where all personas agree
-2. **Security-First** - Security agent has early veto power at design time
-3. **Nudge Before Escalate** - 3 automated nudges before human involvement
-4. **File-Based Recovery** - All state persisted, agents can restart/resume
-5. **Real Tooling** - No simulated actions; agents actually write and test code
+1. **Adversarial quality** — builders and challengers, not self-review. Quality emerges from tension, not trust.
+2. **Adaptive composition** — the team matches the task. Static personas for code. Generated specialists for everything else. Same behavioral contract either way.
+3. **Consensus before execution** — mandatory design discussion where all agents agree on approach. The #1 cause of rework is misalignment; Phase 0B eliminates it upfront.
+4. **Real tooling** — agents actually edit files, run tests, read code, query databases. No simulated actions.
+5. **Passive coordination** — the orchestrator monitors and facilitates. It doesn't direct work. Agents self-organize via @mentions.
+6. **File-based recovery** — all state lives in files. Agents can crash, restart, and resume from where they left off.
+7. **Escalation discipline** — three automated nudges before human involvement. Reduces interruptions without allowing indefinite stalls.
 
 ---
 
@@ -65,11 +73,11 @@ Named after the Simpsons character, Ralph Wiggum is an iterative autonomous codi
 | No domain specialization | Same agent handles security, testing, architecture |
 | Iteration overhead | May generate excessive attempts for poorly specified tasks |
 
-**How Mandali Addresses This:**
-- **Multi-agent collaboration** instead of single-agent retry loop
-- **Phase 0B Design Discussion** resolves ambiguity before implementation
-- **Specialized personas** (Security, QA, SRE) catch domain-specific issues
-- **Satisfaction-based termination** instead of iteration limits
+**How Mandali Differs:**
+- Multiple specialized agents instead of one agent retrying — security issues caught by security experts, not by the same agent that wrote the code
+- Critics challenge Doers in real time, catching blind spots that self-correction loops miss
+- Phase 0B design discussion resolves ambiguity before execution starts
+- Satisfaction-based termination instead of iteration limits
 
 ---
 
@@ -95,12 +103,12 @@ Created by Steve Yegge, Gas Town is a sophisticated multi-agent workspace manage
 | Centralized Mayor | Single point of coordination can become bottleneck |
 | Infrastructure requirements | Requires careful setup of git worktrees, tmux sessions |
 
-**How Mandali Addresses This:**
-- **5 personas** is sufficient for most software tasks without resource explosion
-- **Passive orchestrator** - not a "Mayor" directing work, just monitoring/facilitating
-- **Emergent coordination** via @mentions rather than top-down task assignment
-- **Simple file-based state** instead of complex Beads/Rigs/Crews hierarchy
-- **Lower barrier to entry** - single Python script, no infrastructure required
+**How Mandali Differs:**
+- Team scales to the task (5 to 11 agents) instead of defaulting to 20+
+- Passive orchestrator monitors — doesn't direct work like Gas Town's Mayor
+- Emergent coordination via @mentions rather than top-down task assignment
+- Simple file-based state instead of complex Beads/Rigs/Crews hierarchy
+- Single Python script, no infrastructure setup required
 
 ---
 
@@ -126,12 +134,12 @@ AutoGen is Microsoft's multi-agent conversation framework enabling AI agents to 
 | Security gaps | Basic sandboxing; lacks enterprise governance features |
 | Programmatic patterns | Conversation flows are code-defined, not emergent |
 
-**How Mandali Addresses This:**
-- **File-based conversation** - natural async dialogue, not programmatic patterns
-- **Agent autonomy** - agents decide when to speak based on @mentions and domain
-- **Built-in observability** - `conversation.txt` is a complete audit log
-- **Security persona** - dedicated agent for security review with veto power
-- **No vendor lock-in** - uses Copilot CLI, not tied to Azure services
+**How Mandali Differs:**
+- File-based conversation — natural async dialogue, not programmatic patterns
+- Agents decide when to speak based on @mentions and domain relevance
+- `conversation.txt` is a complete human-readable audit log
+- Dedicated security agent with design-time veto power
+- Uses Copilot CLI, not tied to Azure services
 
 ---
 
@@ -157,12 +165,12 @@ CrewAI is an open-source framework for orchestrating role-playing AI agents. Tea
 | Configuration challenges | Tuning agent behaviors for dynamic tasks is difficult |
 | Production gaps | Requires additional tooling for enterprise integration |
 
-**How Mandali Addresses This:**
-- **Right-sized complexity** - 5 personas match typical software dev team roles
-- **File-based persistence** - conversation and decisions survive restarts
-- **Satisfaction tracking** - explicit state per agent provides auditability
-- **Phase 0 consensus** - reduces non-determinism via upfront agreement
-- **Real tool integration** - agents use actual Copilot CLI, not simulated actions
+**How Mandali Differs:**
+- Team assembled to match the task, not pre-configured for every scenario
+- Adversarial pairs per domain prevent the groupthink that single-role teams are prone to
+- File-based persistence — conversation and decisions survive restarts
+- Phase 0 consensus reduces non-determinism via upfront agreement
+- Agents use actual Copilot CLI with real tools, not simulated actions
 
 ---
 
@@ -186,11 +194,11 @@ Software company simulations where AI agents play roles (CEO, PM, Architect, Eng
 | Synchronous only | Chat-chain model; no async collaboration |
 | No real testing | Tests are generated but not executed against real codebase |
 
-**How Mandali Addresses This:**
-- **Collaborative phases** - agents discuss and iterate, not waterfall handoffs
-- **Real tool execution** - agents run tests, read code, make edits via Copilot CLI
-- **Async communication** - file-based model allows parallel work
-- **Live codebase integration** - agents work on actual repository, not simulations
+**How Mandali Differs:**
+- Agents discuss and iterate during execution, not just at handoff points
+- Real tool execution — agents run tests, read code, make edits
+- File-based model allows parallel work across agents
+- Agents work on the actual repository, not simulated environments
 
 ---
 
@@ -198,71 +206,58 @@ Software company simulations where AI agents play roles (CEO, PM, Architect, Eng
 
 | Feature | Ralph Wiggum | Gas Town | AutoGen | CrewAI | MetaGPT | **Mandali** |
 |---------|-------------|----------|---------|--------|---------|----------|
-| Multi-agent | ❌ Single | ✅ 20-30+ | ✅ GroupChat | ✅ Crews | ✅ Roles | ✅ 5 Personas |
+| Multi-agent | ❌ Single | ✅ 20-30+ | ✅ GroupChat | ✅ Crews | ✅ Roles | ✅ Adaptive (5-11) |
+| Adversarial roles | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Doer/Critic/Scope-keeper |
+| Task-adaptive team | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Dynamic generation |
+| Design consensus | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Phase 0B |
 | Real tooling | ✅ | ✅ | ⚠️ Sandboxed | ❌ Simulated | ❌ Simulated | ✅ Copilot CLI + MCP + Skills |
-| Async support | ❌ | ✅ | ⚠️ Limited | ❌ | ❌ | ✅ File-based |
+| Async collaboration | ❌ | ✅ | ⚠️ Limited | ❌ | ❌ | ✅ File-based |
 | State persistence | ❌ Fresh context | ✅ Git-backed | ❌ Memory only | ⚠️ Session | ❌ | ✅ File-based |
 | Phased plans | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ _CONTEXT/_INDEX/phases |
 | Artifact discovery | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ LLM-driven (5 levels) |
 | MCP server support | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Auto-loaded |
 | Git milestones | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ Commit on pass |
-| Security focus | ❌ | ❌ | ⚠️ Basic | ❌ | ❌ | ✅ Dedicated agent |
-| Design consensus | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Phase 0B |
-| Human escalation | Manual | Manual | Manual | Manual | Manual | ✅ Nudge→Escalate |
+| Security focus | ❌ | ❌ | ⚠️ Basic | ❌ | ❌ | ✅ Dedicated agent + veto |
+| Verification loop | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ Trust but verify |
+| Human escalation | Manual | Manual | Manual | Manual | Manual | ✅ Nudge → Escalate |
 | Complexity | Low | High | Medium | Medium | Medium | Low-Medium |
-| Resource cost | Low | High | Medium | Medium | Medium | Low |
+| Resource cost | Low | High | Medium | Medium | Medium | Low-Medium |
 
 ---
 
-## What Makes Mandali Unique
+## What Sets Mandali Apart
 
-### 1. **LLM-Driven Artifact Discovery**
-Default mode skips interview/planning entirely. LLM reads your prompt and plan files, recursively discovers all referenced artifacts (up to 5 levels deep), copies them to workspace, and launches agents. Planning is opt-in via `--generate-plan`, not the default path.
+### Team Model
 
-### 2. **Phased Plan Structure**
-Plans split into `_CONTEXT.md` (global context), `_INDEX.md` (phase tracking), and individual `phase-*.md` files. Prevents context loss in large projects and enables agents to track progress per-phase.
+**Adversarial by default.** Most multi-agent systems assign roles that cooperate: one agent writes code, another tests it. Mandali pairs each domain with both a builder and a challenger. The builder proposes and executes. The challenger reviews methodology, rigor, and assumptions — not as an afterthought quality gate, but as a continuous participant in the conversation. A Scope-keeper prevents domains from drifting when work spans multiple areas.
 
-### 3. **Hybrid Conversation Model**
-Orchestrator writes on behalf of agents (solves concurrency), agents read directly via tools (true autonomy). No central controller directing work.
+**Adaptive composition.** The static code team (Dev, Security, PM, QA, SRE) is the default for software tasks. For non-code work — data analysis, writing, research — Mandali generates domain specialists that carry the same behavioral depth as the hand-tuned team: engagement rules, satisfaction criteria, conflict resolution, self-unblocking protocols. Mixed tasks get both. The behavioral contract is the same; only the expertise changes.
 
-### 4. **Phase 0: Consensus Before Code**
-- **Phase 0A**: All agents explore codebase with background agents to build understanding
-- **Phase 0B**: Mandatory design discussion until all agents agree on approach
+### Collaboration Model
 
-This addresses the #1 cause of rework in AI-generated code: misalignment between agents on approach.
+**Consensus before execution.** Phase 0A builds understanding (agents explore codebase, read materials). Phase 0B is a mandatory design discussion where the team — including critics — must agree on approach before work begins. This catches misalignment at the cheapest possible point.
 
-### 5. **Security-First by Design**
-Security agent participates in design discussion with veto power. Issues caught at Phase 0, not after code is written.
+**Self-organizing communication.** Agents coordinate through @mentions in a shared conversation file. No central controller assigns turns. Each agent has engagement rules that define when to speak and when to stay quiet, based on domain relevance — not a programmed sequence.
 
-### 6. **MCP Server & Skills Integration**
-Agents automatically receive MCP server configuration from `~/.copilot/mcp-config.json`, and the user's full Copilot config directory (`~/.copilot`) is passed to sessions so locally installed **skills and extensions** are available to all persona agents.
+**Conflict resolution with teeth.** Tie-breaker authority is explicit: Security wins security disputes, PM wins scope disputes. The 2-strike rule prevents stalemates: after raising the same concern twice without resolution, an agent must propose a concrete solution or yield and record the disagreement. Progress always moves forward.
 
-### 7. **Nudge Before Escalate**
-Three automated nudges at stall intervals before human involvement. Reduces unnecessary interruptions while preventing indefinite stalls.
+### Quality Model
 
-### 8. **File-Based Recovery**
-All state in files: `conversation.txt`, `satisfaction.txt`, `DecisionsTracker.md` (deviation log). Agents can crash, restart, and resume.
+**Trust but verify.** After all agents declare SATISFIED, a verification agent compares plan vs actual implementation by reading the code. DecisionsTracker entries are treated as intentional deviations, not gaps. If real gaps are found, the conversation is archived and the team is relaunched with a gap report. Up to N rounds.
 
-### 9. **Git Commits at Milestones**
-Agents are instructed to commit working code at major milestones:
-- Only commit when build + tests pass
-- Use structured commit format: `[Mandali] feat: Brief description`
-- Include commit hash in response for traceability
-- Satisfaction criteria includes "Working code committed to git"
+**Pre-commit code review.** The Dev persona launches an independent code-review agent before every commit. Self-review rarely catches what a fresh context does.
 
-This ensures recoverable progress even if agents stall or crash mid-feature.
+**Deviation tracking.** `DecisionsTracker.md` records where implementation differs from the plan — not as a bug tracker, but as a human-readable diff between "what I asked for" and "what I got." A human reads it to decide what to keep.
 
-### 10. **Right-Sized Collaboration**
-5 personas match natural software team structure. Not overkill (Gas Town's 30 agents), not undersized (Ralph Wiggum's single agent).
+### Tooling Model
 
-### 11. **Real Tool Integration**
-Agents use Copilot CLI with actual developer tools plus MCP servers and user skills. No simulation—they really edit files, run tests, read code, query databases, browse web pages.
+**Real tools, real results.** Agents use Copilot CLI with actual developer tools, MCP servers, and user-installed skills. They edit files, run tests, read code, query databases, browse web pages. No simulations.
 
-### 12. **Trust but Verify — Verification Loop**
-After all agents declare SATISFIED, a verification agent compares plan vs actual implementation by reading the code. DecisionsTracker entries are treated as intentional deviations. If gaps are found, the conversation is archived and agents are relaunched with a gap report — up to `--max-retries` rounds (default 5).
+**Artifact discovery.** Default mode skips planning entirely. The LLM reads your prompt and plan files, recursively discovers all referenced artifacts (5 levels deep), copies them to workspace, and launches the team. Planning is opt-in, not the default.
 
-### 13. **Pre-Commit Code Review**
-The Dev persona launches an independent code-review agent before every commit. Self-review rarely catches issues; a separate agent with fresh context is more thorough.
+**Phased plan structure.** Large plans split into `_CONTEXT.md` (global constraints), `_INDEX.md` (progress tracking), and individual `phase-*.md` files. Prevents the context loss that happens when agents work from a single large document.
+
+**Git isolation.** When the output path is inside a git repo, Mandali creates a worktree automatically. Agents work in isolation; the original directory is never touched.
 
 ---
 
@@ -270,11 +265,11 @@ The Dev persona launches an independent code-review agent before every commit. S
 
 This system builds on ideas from:
 
-- **Ralph Wiggum** - The iterative feedback loop pattern
-- **Gas Town** - File-based persistence and CLI integration philosophy
-- **AutoGen** - Multi-agent conversation patterns and GroupChat concepts
-- **CrewAI** - Role-based specialization and task delegation
-- **MetaGPT/ChatDev** - Software team role modeling
+- **Ralph Wiggum** — The iterative feedback loop pattern
+- **Gas Town** — File-based persistence and CLI integration philosophy
+- **AutoGen** — Multi-agent conversation patterns and GroupChat concepts
+- **CrewAI** — Role-based specialization and task delegation
+- **MetaGPT/ChatDev** — Software team role modeling
 
 Mandali gratefully acknowledges these projects and their communities for advancing the field of multi-agent AI collaboration.
 
