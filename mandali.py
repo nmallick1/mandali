@@ -3189,6 +3189,8 @@ class AutonomousOrchestrator:
         self._workspace: Optional['Workspace'] = None
         self._plan_content: Optional[str] = None
         self._user_intent: Optional[str] = None
+        self.teams_bridge = None
+        self.teams_thread_id = None
     
     async def start(self):
         log("Starting Copilot client...", "INFO")
