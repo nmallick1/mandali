@@ -139,6 +139,273 @@ POLL_INTERVAL_SECONDS = 10  # Check status every 10 seconds
 import threading
 _satisfaction_lock = threading.Lock()
 
+# Debug logging — enabled via --debug flag, writes JSONL to mandali-artifacts/debug.jsonl
+_debug_enabled = False
+_debug_file = None
+
+def _debug_log(event: str, data: dict):
+    """Write a debug event to the JSONL log file if debugging is enabled."""
+    if not _debug_enabled or not _debug_file:
+        return
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "event": event,
+        **data,
+    }
+    try:
+        with open(_debug_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception:
+        pass  # Debug logging must never crash the app
+
+# ============================================================================
+# Dynamic Persona Constants
+# ============================================================================
+
+PERSONA_FRONTMATTER_KEYS = ['id', 'name', 'domain', 'role', 'mention']
+
+# Universal behavioral skeleton for dynamically generated personas.
+# Slots use {placeholder} syntax, filled by render_persona().
+# Runtime tokens use {{TOKEN}} syntax, filled by the orchestrator at launch.
+PERSONA_SKELETON_TEMPLATE = """---
+id: {id}
+name: {name}
+domain: {domain}
+role: {role}
+mention: "{mention}"
+---
+
+# {name} - {role_name}
+
+> {role_description}
+
+## Team
+{{TEAM_ROSTER}}
+
+## Engagement
+{engagement_rules}
+- **Before responding**: check last {{CONVERSATION_CHECK_LINES}} lines of conversation for relevant context
+
+## Key Files
+
+You have access to ALL tools available in your environment — use whatever tools are needed to accomplish your work. Key files for this project:
+
+- `_CONTEXT.md` — global context, architecture decisions, non-negotiables
+- `_INDEX.md` — phase tracking, progress status
+- `phase-*.md` — detailed tasks per phase
+- `conversation.txt` — team communication
+- `DecisionsTracker.md` — deviation log for human review
+
+## Decision Tracking
+
+Record deviations in `DecisionsTracker.md` (path in your initial prompt). This is a **deviation log for human review** — a human reads it to diff "what I asked for" vs "what I got." Record when:
+
+{decision_tracking_triggers}
+
+**Catch-all:** Record any choice a human comparing plan to implementation would be surprised by, including choices where the plan was silent. Read existing decisions first — don't re-litigate settled choices. Use the template format with `[HH:MM:SS]` timestamps.
+
+---
+
+## Phased Development Workflow
+
+1. Read `_CONTEXT.md` first → `_INDEX.md` → current phase file
+2. Complete each phase fully before moving to the next
+3. Verify quality gates before declaring phase complete
+
+### Phase 0A: Context Building
+Before discussion, build complete understanding:
+1. Read `_CONTEXT.md` first — understand the user's original ask, the problem being solved, and the big picture
+2. Read the full plan and explore relevant materials — understand scope, constraints, existing work
+3. Identify domain-specific concerns this plan may not have considered
+4. Post: `@Team - I have reviewed the plan and materials. Ready for design discussion.`
+
+Wait for ALL agents to confirm before design discussion begins.
+
+### Phase 0B: Design Discussion
+{phase_0b_actions}
+
+---
+
+## Domain Expertise
+
+{domain_expertise}
+
+## Non-Negotiables
+
+{non_negotiables}
+
+## Quality Definition
+
+{quality_definition}
+
+## Core Rules
+
+{core_rules}
+
+## Self-Unblocking (2-Strike Rule)
+
+After raising a concern twice without resolution, you MUST either:
+1. Propose a concrete resolution (a specific deliverable, fix, or alternative approach), or
+2. Yield and record the disagreement in `DecisionsTracker.md`
+
+No endless stalemates. The goal is progress, not being right.
+
+## Domain Ownership & Conflict Resolution
+
+- **Own**: {domain_ownership}
+- **Defer to**: {defer_to}
+- **Shared jurisdiction**: {shared_jurisdiction}
+- **Conflict resolution**: {conflict_resolution_stance}
+
+## Phase Responsibilities
+
+{phase_responsibilities}
+
+---
+
+## Self-Validation
+
+Verify your own work actually produces the expected result before declaring done. Don't rely solely on others to catch your mistakes. If your deliverable can be checked, check it.
+
+## Incremental Review
+
+Review after each phase, not just at the end. Problems found early are cheaper to fix. After each phase, verify that earlier deliverables still hold — new work can break prior work.
+
+---
+
+## Satisfaction Criteria
+
+ALL must be true to declare SATISFIED:
+{satisfaction_criteria}
+
+**⚠️ Do NOT declare SATISFIED after one phase. Only when ALL phases are done or STOP directive reached.**
+
+## Response Format
+```
+@Team - [Brief status]
+PHASE: [current] | STATUS: [In Progress / Complete / Blocked]
+{response_format_fields}
+SATISFACTION_STATUS: WORKING | SATISFIED | BLOCKED - [reason] | PAUSED
+```
+"""
+
+CLASSIFIER_PROMPT = """You are a task classifier. Respond with EXACTLY the format shown below. Nothing else.
+
+## Decision Rule
+
+Ask ONE question: **Does the task require producing or modifying software as a deliverable?**
+
+- YES → software-development (building APIs, CLIs, libraries, infrastructure-as-code, scripts, configurations)
+- NO → non-software (reports, analysis, writing, research, design, planning — even if the SUBJECT is about software)
+- BOTH → mixed (software deliverables AND non-software deliverables in different domains)
+
+The subject of the task does not determine the type. Only the deliverable does.
+- "Analyze AI code review tools" → non-software (deliverable is a report ABOUT software, not software itself)
+- "Build an AI code review tool" → software-development (deliverable IS software)
+- "Build a dashboard AND write a market analysis" → mixed
+
+## Domain Rules
+- Use lowercase slugs (e.g., market-research, technical-writing, data-analysis)
+- For pure software tasks: DOMAIN_1 is software-development
+- Only list domains needing dedicated expertise. Skip generic skills.
+- 1-3 domains max. Use NONE for unused slots.
+
+## Output Format (copy this exactly, fill in values)
+
+TASK_TYPE: <software-development or non-software or mixed>
+DOMAIN_1: <primary-domain-slug>
+DOMAIN_2: <supporting-domain-slug or NONE>
+DOMAIN_3: <supporting-domain-slug or NONE>
+
+IMPORTANT: TASK_TYPE must be one of exactly three values: software-development, non-software, mixed.
+Respond with ONLY the 4 lines above. No explanation, no JSON, no markdown fences.
+"""
+
+PERSONA_GENERATOR_PROMPT = """
+## Quality Bar (ALL personas MUST embody these traits)
+1. High standards, zero ego — critique the work, not the person
+2. Goes beyond the ask — anticipate issues, suggest improvements proactively
+3. Domain depth — bring genuine specialist knowledge, not generic platitudes
+4. Adversarial rigor — challenge assumptions, demand evidence, test boundaries
+5. Opinionated but flexible — have strong defaults, yield to better arguments
+6. Concrete over abstract — code samples, specific metrics, real examples over vague guidance
+7. Self-aware scope — know what you own, what you don't, and say so explicitly
+8. Progress-oriented — unblock yourself and others, never stall for perfection
+9. Deliverable-focused — every action should advance a concrete output
+10. Honest about uncertainty — say "I don't know" rather than fabricate domain expertise
+11. Incremental verification — verify work at each step, don't batch-validate at the end
+12. Collaborative by default — engage with teammates' work, build on each other's output
+13. Domain-appropriate quality gates — enforce professional standards for your domain even when the user doesn't ask explicitly (e.g., code personas: performance, resource consumption, unhandled exceptions; analytical personas: validated facts, cited sources, reproducible methodology; writing personas: accuracy, logical structure, audience-appropriate tone)
+
+## Role Types
+- **Doer**: Primary implementer for the domain. Produces deliverables, proposes approaches, executes. May also review and challenge others' work that touches their domain.
+- **Critic**: Quality challenger for the domain. Challenges methodology, verifies rigor, catches blind spots. NOT passive — actively contributes solutions, writes fixes, and demonstrates better approaches when critiquing. A Critic who only points out problems without helping resolve them is failing.
+- **Scope-keeper**: Cross-domain awareness. Ensures domains don't drift, resolves boundary disputes, maintains coherent big picture.
+
+Note: These roles define primary orientation, not rigid boundaries. A QA Doer writes tests AND critiques the dev's work from a quality perspective. A Security Critic spots vulnerabilities AND suggests fixes or writes patches. Every persona is expected to be hands-on in their domain.
+
+## Persona File Structure
+The .persona.md file MUST include:
+- YAML frontmatter with: id, name, domain, role, mention
+- Role name and description
+- Engagement rules (when to speak, when to stay quiet)
+- Decision tracking triggers
+- Phase 0B actions (design discussion behavior — MUST include negotiating domain-specific quality gates beyond user's explicit requirements)
+- Domain expertise (2-4 paragraphs of deep domain knowledge)
+- Non-negotiables (absolute rules this persona enforces)
+- Quality definition (what "good" means in this domain)
+- Core operating principles (5-10 rules)
+- Domain ownership, defer-to, and shared jurisdiction
+- Conflict resolution stance
+- Phase responsibilities
+- Satisfaction criteria (checklist — ALL must be true to declare SATISFIED)
+- Response format fields
+
+## Important
+- Generate personas with REAL domain depth — not generic "I review things" descriptions
+- The persona must be useful for the SPECIFIC domain, not a generic template with domain name swapped in
+- Engagement rules must be specific to the domain's concerns
+- Satisfaction criteria must reflect domain-specific quality gates
+- The id must be unique and descriptive (not "persona-1")
+"""
+
+DEDUP_AGENT_PROMPT = """You are a deduplication analyst for a multi-agent collaboration system.
+
+Your job: Analyze a set of persona definitions for overlap. You receive full persona file contents (not summaries) because you must distinguish surface overlap from real functional overlap.
+
+Two personas that both mention "data quality" may serve completely different functions:
+- A "Data Quality Reviewer" focused on pipeline validation is different from
+- A "Data Quality Reviewer" focused on statistical methodology review
+
+Read the FULL definitions carefully before deciding.
+
+Output ONLY valid JSON (no markdown fences) with this structure:
+{
+  "keep": [
+    {"id": "<persona-id>", "reason": "<why this persona is unique and needed>"}
+  ],
+  "drop": [
+    {"id": "<persona-id>", "reason": "<why this persona is redundant>", "covered_by": "<id of persona that covers this>"}
+  ],
+  "merge": [
+    {
+      "sources": ["<persona-id-1>", "<persona-id-2>"],
+      "merged_name": "<suggested name for merged persona>",
+      "reason": "<why these should be combined>",
+      "merge_guidance": "<what to keep from each source>"
+    }
+  ]
+}
+
+Rules:
+- Default to KEEP unless you find genuine functional overlap (not just label similarity)
+- MERGE when two personas have significantly overlapping expertise and responsibilities, making them compete for the same work
+- DROP when one persona is strictly a subset of another (the broader one covers everything the narrow one does)
+- Static team members (Dev, PM, QA, Security, SRE) cannot be dropped or merged — only consider overlap between dynamic personas, and between dynamic and static
+- When a dynamic persona overlaps with a static persona, DROP the dynamic one (static personas are hand-tuned and take priority)
+- Be conservative: when in doubt, KEEP both. False dedup is worse than mild redundancy.
+"""
+
 # ============================================================================
 # Data Classes
 # ============================================================================
@@ -151,6 +418,9 @@ class PersonaAgent:
     mention: str  # @Dev, @PM, etc.
     session: Any = None
     task: asyncio.Task = None  # Background task
+    prompt_file: str = None  # Path to persona file (dynamic personas)
+    dynamic: bool = False  # True for dynamically generated personas
+    domain: str = None  # Domain (for dynamic personas)
 
 
 @dataclass
@@ -245,6 +515,14 @@ class Metrics:
     per_agent: Dict[str, Dict] = field(default_factory=dict)
 
 
+@dataclass
+class TaskClassification:
+    """Result of classifying a task into type and domains."""
+    task_type: str  # "software-development" | "non-software" | "mixed"
+    domains: list  # [{"name": "analytics", "role_in_task": "primary"}, ...]
+    interview_summary: dict = field(default_factory=dict)
+
+
 # ============================================================================
 # Utilities
 # ============================================================================
@@ -301,10 +579,1095 @@ def load_mcp_config() -> dict:
 MCP_SERVERS_CONFIG: dict = {}
 
 
-def load_persona_prompt(persona_id: str) -> str:
-    persona_file = PERSONAS_DIR / f"{persona_id}.persona.md"
-    with open(persona_file, 'r', encoding='utf-8') as f:
-        return f.read()
+def _build_session_config(model: str, system_message: str, working_directory: str = None) -> dict:
+    """Build a session config with full tool access (MCP servers, skills, extensions).
+    
+    All sessions — persona agents and orchestrator housekeeping agents alike —
+    get the same tool access. The system prompt controls behavior, not tool availability.
+    """
+    copilot_config_dir = Path.home() / ".copilot"
+    config = {
+        "model": model,
+        "system_message": system_message,
+    }
+    if working_directory:
+        config["working_directory"] = working_directory
+    if copilot_config_dir.exists():
+        config["config_dir"] = str(copilot_config_dir)
+    if MCP_SERVERS_CONFIG:
+        config["mcp_servers"] = MCP_SERVERS_CONFIG
+    return config
+
+
+def load_persona_prompt(persona_id: str, prompt_file: str = None,
+                        team_roster: list = None, team_size: int = None) -> str:
+    """Load a persona prompt file, optionally replacing runtime tokens.
+    
+    For static personas: loads from personas/ directory.
+    For dynamic personas: loads from the specified prompt_file path, strips YAML frontmatter.
+    Replaces {{TEAM_ROSTER}} and {{CONVERSATION_CHECK_LINES}} tokens if team info provided.
+    """
+    if prompt_file:
+        filepath = Path(prompt_file)
+    else:
+        filepath = PERSONAS_DIR / f"{persona_id}.persona.md"
+    
+    content = filepath.read_text(encoding='utf-8')
+    
+    # Strip YAML frontmatter from dynamic personas
+    if prompt_file and content.startswith('---'):
+        content = strip_persona_frontmatter(content)
+    
+    # Replace runtime tokens if team info is available
+    if team_roster is not None:
+        roster_str = format_team_roster(team_roster, current_persona_id=persona_id)
+        content = content.replace('{{TEAM_ROSTER}}', roster_str)
+    
+    if team_size is not None:
+        check_lines = compute_conversation_check_lines(team_size)
+        content = content.replace('{{CONVERSATION_CHECK_LINES}}', str(check_lines))
+    
+    return content
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip markdown code fences from LLM response text.
+    
+    Handles ```json, ```JSON, bare ```, and no-newline variants.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        # Remove opening fence (with optional language tag)
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1:]
+        else:
+            # No newline: strip ``` prefix and any language tag
+            text = text[3:]
+            for tag in ("json", "JSON", "yaml", "YAML"):
+                if text.startswith(tag):
+                    text = text[len(tag):]
+                    break
+        # Remove closing fence
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()
+            text = text[:-3]
+        text = text.strip()
+    return text
+
+
+def render_persona(skeleton: str, slots: dict) -> str:
+    """Fill placeholder slots in a persona skeleton template.
+    
+    Uses simple string replacement so that {{RUNTIME_TOKENS}} are preserved
+    (they don't match any {single_brace_key} pattern).
+    """
+    import re
+    result = skeleton
+    for key, value in slots.items():
+        result = result.replace(f'{{{key}}}', str(value))
+    
+    # Warn about unreplaced single-brace placeholders (not {{runtime}} tokens)
+    unreplaced = re.findall(r'(?<!\{)\{([a-z_]+)\}(?!\})', result)
+    if unreplaced:
+        log(f"Unreplaced placeholders in persona: {unreplaced}", "WARN")
+    
+    return result
+
+
+def parse_persona_frontmatter(filepath: Path) -> dict:
+    """Extract YAML frontmatter from a .persona.md file.
+    
+    Returns dict with keys: id, name, domain, role, mention.
+    Raises ValueError if frontmatter is missing or invalid.
+    """
+    import yaml
+    content = filepath.read_text(encoding='utf-8')
+    lines = content.split('\n')
+    
+    if not lines or lines[0].strip() != '---':
+        raise ValueError(f"No YAML frontmatter found in {filepath}")
+    
+    # Find closing --- on its own line with no indentation (skip line 0)
+    end_line = None
+    for i, line in enumerate(lines[1:], 1):
+        if line.rstrip() == '---':
+            end_line = i
+            break
+    
+    if end_line is None:
+        raise ValueError(f"No closing frontmatter delimiter in {filepath}")
+    
+    frontmatter_str = '\n'.join(lines[1:end_line])
+    frontmatter = yaml.safe_load(frontmatter_str)
+    
+    if frontmatter is None:
+        raise ValueError(f"Empty or invalid YAML frontmatter in {filepath}")
+    
+    # Validate required keys
+    missing = [k for k in PERSONA_FRONTMATTER_KEYS if k not in frontmatter]
+    if missing:
+        raise ValueError(f"Missing frontmatter keys in {filepath}: {missing}")
+    
+    return {k: frontmatter[k] for k in PERSONA_FRONTMATTER_KEYS}
+
+
+def strip_persona_frontmatter(content: str) -> str:
+    """Remove YAML frontmatter from persona file content, returning just the prompt."""
+    lines = content.split('\n')
+    if not lines or lines[0].strip() != '---':
+        return content
+    for i, line in enumerate(lines[1:], 1):
+        if line.rstrip() == '---':
+            return '\n'.join(lines[i + 1:]).lstrip('\n')
+    return content
+
+
+def compute_conversation_check_lines(team_size: int) -> int:
+    """Adaptive conversation window: scales with team size."""
+    return max(50, team_size * 15)
+
+
+def format_team_roster(team: list, current_persona_id: str = None) -> str:
+    """Format team roster as @mention list for persona files.
+    
+    Marks the current persona with '(you)' for self-awareness.
+    """
+    parts = []
+    for m in team:
+        mention = m.get('mention', f"@{m['name']}")
+        if m['id'] == current_persona_id:
+            parts.append(f"{mention} (you)")
+        else:
+            parts.append(mention)
+    return ', '.join(parts)
+
+
+def build_orchestrator_message(team_roster: list, plan_location: str, task_type: str = "software-development",
+                               review_notes_path: str = None) -> str:
+    """Generate the Phase 0A/0B/Communication conversation message dynamically.
+    
+    Replaces the hardcoded @PM/@Dev/@Security/@QA/@SRE block with role-based
+    instructions built from the actual team roster.
+    """
+    # Determine lead
+    has_pm = any(m['id'] == 'pm' for m in team_roster)
+    if task_type == "non-software" and not has_pm:
+        # Pure non-code: Scope-keeper leads
+        scope_keepers = [m for m in team_roster if m.get('role') == 'Scope-keeper']
+        lead = scope_keepers[0] if scope_keepers else team_roster[0]
+    else:
+        # Code or mixed: PM leads (or first persona if no PM)
+        pm = next((m for m in team_roster if m['id'] == 'pm'), None)
+        lead = pm or team_roster[0]
+    
+    lead_mention = lead.get('mention', f"@{lead['name']}")
+    
+    # Build Phase 0B role-based instructions
+    critics = [m for m in team_roster if m.get('role') == 'Critic']
+    doers = [m for m in team_roster if m.get('role') == 'Doer' and m['id'] != lead['id']]
+    
+    phase_0b_steps = [f"1. **{lead_mention}**: Present the plan, clarify acceptance criteria, lead the discussion"]
+    
+    if critics:
+        critic_mentions = ', '.join(m.get('mention', f"@{m['name']}") for m in critics)
+        phase_0b_steps.append(f"2. Each Critic ({critic_mentions}): Raise domain-specific concerns NOW")
+    
+    if doers:
+        doer_mentions = ', '.join(m.get('mention', f"@{m['name']}") for m in doers)
+        step_num = len(phase_0b_steps) + 1
+        phase_0b_steps.append(f"{step_num}. Each Doer ({doer_mentions}): Propose approach, identify risks, suggest adjustments")
+    
+    # For static code team, add specific role callouts
+    security = next((m for m in team_roster if m['id'] == 'security'), None)
+    if security:
+        step_num = len(phase_0b_steps) + 1
+        phase_0b_steps.append(f"{step_num}. **@Security**: Raise ALL security concerns NOW (not during implementation)")
+    
+    step_num = len(phase_0b_steps) + 1
+    phase_0b_steps.append(f"{step_num}. ALL agents must participate and acknowledge the plan")
+    
+    phase_0b_text = '\n'.join(phase_0b_steps)
+    
+    # Security gate for mixed/code tasks
+    security_gate = ""
+    if security and task_type in ("software-development", "mixed"):
+        security_gate = "\n- @Security must approve the security approach BEFORE implementation begins"
+    
+    # Phase 0B deliverables (gap analysis)
+    deliverables = f"""
+### Design Discussion Deliverables
+Design discussion produces updated artifacts, not just conversation:
+1. If the team identified gaps, missing phases, or restructuring:
+   - {lead_mention} updates _INDEX.md to reflect agreed structure
+   - Affected phase files are edited (added tasks, modified criteria, reordered work)
+   - New phase files are created if the team agreed to add phases
+2. All decisions and filled gaps recorded in DecisionsTracker.md
+3. {lead_mention} declares: "@Team design discussion complete. Plan files updated. Begin Phase 1"
+"""
+
+    # Communication section with full mention list
+    all_mentions = ', '.join(m.get('mention', f"@{m['name']}") for m in team_roster)
+    all_mentions += ', @Team, @AllAgents'
+    
+    # Phased workflow section
+    phased_workflow = f"""
+## Phased Plan Workflow (if using phases/ structure)
+
+After each phase is complete:
+1. {lead_mention} updates `_INDEX.md` with: ✅ Complete, commit hash
+2. {lead_mention} verifies `DecisionsTracker.md` has entries for any deviations made during this phase — if choices were made that differ from the plan or where the plan was silent, they must be recorded before moving on
+3. {lead_mention} announces: "@Team Phase X complete, proceeding to Phase Y"
+4. If plan says "STOP after Phase X", team stops and reports to human
+"""
+
+    # Review notes reference (if plan review produced recommendations)
+    review_notes_ref = ""
+    if review_notes_path:
+        review_notes_ref = f"\n- **Before starting discussion**: Read `{review_notes_path}` — it contains pre-execution review notes to consider"
+
+    return f"""@AllAgents - Welcome to Mandali!
+
+You are an autonomous team implementing {plan_location}
+
+---
+
+## PHASE 0A: CONTEXT BUILDING (Before Design Discussion)
+
+Before discussing the design, each agent MUST build a complete understanding:
+
+### Required Actions for EACH Agent:
+1. **Read _CONTEXT.md FIRST** (if phased plan) - contains global architecture, security, non-negotiables
+2. **Read _INDEX.md** (if phased plan) - shows phase status and dependencies
+3. **Read the relevant phase file(s)** - understand tasks and quality gates
+4. **Explore the codebase** - understand project structure, patterns, conventions
+5. **Launch background agents** if needed to explore large codebases efficiently
+6. **Understand dependencies** - what exists, what needs to be built
+
+### Your Tools:
+- Use `view` to read files
+- Use `glob` and `grep` to explore the codebase
+- Use `task` tool with agent_type="explore" for parallel codebase exploration
+- Take your time - understanding the full picture is critical
+
+### When Ready:
+Each agent should post: "@Team - I have reviewed the plan and codebase. Ready for design discussion."
+
+**Wait for ALL agents to confirm readiness before starting design discussion.**
+
+---
+
+## PHASE 0B: DESIGN DISCUSSION (After All Agents Ready)
+
+Once ALL agents confirm readiness, begin design discussion:
+
+{phase_0b_text}
+
+**Rules for Design Discussion:**
+- ALL agents must participate and acknowledge the plan{security_gate}{review_notes_ref}
+- Team may reorder phases, add sub-phases, or adjust scope
+{deliverables}
+---
+{phased_workflow}
+---
+
+## Communication
+- Use @mentions: {all_mentions}
+- End each message with SATISFACTION_STATUS
+
+## Victory Condition
+All agents SATISFIED = Implementation complete.
+
+---
+
+@AllAgents - Begin by reading the plan and exploring the codebase. 
+Post when you're ready for design discussion.
+"""
+
+
+async def _send_and_get_response(client, model: str, system_prompt: str, message: str,
+                                  timeout_seconds: int = 120) -> str:
+    """Send a single message to an LLM session and return the response text.
+    
+    Uses the event-based SDK pattern (create_session + on + send).
+    No tools/MCP/skills — this is for pure text-in/text-out calls
+    (classification, persona generation, dedup, merge).
+    Raises TimeoutError if no response within timeout_seconds.
+    """
+    session = await client.create_session({
+        "model": model,
+        "system_message": system_prompt,
+    })
+    
+    response_parts = []
+    done = asyncio.Event()
+    
+    def on_event(event):
+        if event.type.value == "assistant.message":
+            response_parts.append(event.data.content)
+        elif event.type.value == "session.idle":
+            done.set()
+    
+    unsubscribe = session.on(on_event)
+    try:
+        await session.send({"prompt": message})
+        await asyncio.wait_for(done.wait(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        raise TimeoutError(f"LLM session timed out after {timeout_seconds}s")
+    finally:
+        unsubscribe()
+        await session.destroy()
+    
+    response = ''.join(response_parts)
+    
+    _debug_log("llm_call", {
+        "system_prompt_preview": system_prompt[:200],
+        "message_preview": message[:500],
+        "response_preview": response[:1000],
+        "response_length": len(response),
+        "model": model,
+    })
+    
+    return response
+
+
+async def classify_task(client, model: str, user_prompt: str, interview_summary: dict) -> 'TaskClassification':
+    """Classify a task into type and domains using LLM analysis.
+    
+    Returns TaskClassification with task_type and ordered domains.
+    On unparseable response, retries in the same session (LLM already
+    has the analysis, just needs to reformat).
+    Conservative default: classifies as 'software-development' when uncertain.
+    """
+    # Extract only deliverable-relevant fields from interview summary.
+    # The full summary contains domain jargon that confuses the classifier.
+    slim_summary = {}
+    for key in ("outcome", "project_name", "success_criteria", "scope", 
+                "output_directory", "constraints", "implicit_requirements"):
+        if key in interview_summary:
+            slim_summary[key] = interview_summary[key]
+    
+    # Put the user's original prompt LAST — recency bias helps the LLM
+    # focus on the actual ask rather than the elaborated interview content.
+    message = (
+        f"Classify this task.\n\n"
+        f"## Interview Context (deliverables only)\n{json.dumps(slim_summary, indent=2)}\n\n"
+        f"## User's Original Prompt (this is the PRIMARY signal for classification)\n{user_prompt}"
+    )
+    
+    VALID_TASK_TYPES = ("software-development", "non-software", "mixed")
+    SW_DEV_DOMAIN = [{"name": "software-development", "role_in_task": "primary"}]
+    
+    # Manage session manually for same-session retry
+    session = await client.create_session({
+        "model": model,
+        "system_message": CLASSIFIER_PROMPT,
+    })
+    
+    async def _send_and_collect(msg: str) -> str:
+        parts = []
+        done = asyncio.Event()
+        def on_event(event):
+            if event.type.value == "assistant.message":
+                parts.append(event.data.content)
+            elif event.type.value == "session.idle":
+                done.set()
+        unsub = session.on(on_event)
+        try:
+            await session.send({"prompt": msg})
+            await asyncio.wait_for(done.wait(), timeout=120)
+        finally:
+            unsub()
+        return ''.join(parts)
+    
+    task_type = None
+    domains = SW_DEV_DOMAIN
+    
+    try:
+        response_text = await _send_and_collect(message)
+        text = response_text.strip()
+        
+        _debug_log("llm_call", {
+            "system_prompt_preview": CLASSIFIER_PROMPT[:200],
+            "message_preview": message[:500],
+            "response_preview": text[:1000],
+            "response_length": len(text),
+            "model": model,
+        })
+        _debug_log("classify_raw", {"response": text[:2000]})
+        
+        # Parse key-value lines via regex
+        task_type_match = re.search(r'TASK_TYPE:\s*(\S+)', text, re.IGNORECASE)
+        domain_matches = re.findall(r'DOMAIN_\d+:\s*(\S+)', text, re.IGNORECASE)
+        
+        task_type = task_type_match.group(1).lower().strip() if task_type_match else None
+        
+        # Build domains list from matches, filtering out NONE
+        if domain_matches:
+            domains = []
+            for i, d in enumerate(domain_matches):
+                d = d.lower().strip()
+                if d and d != "none":
+                    domains.append({"name": d, "role_in_task": "primary" if i == 0 else "supporting"})
+            domains = domains or SW_DEV_DOMAIN
+        
+        if not task_type or task_type not in VALID_TASK_TYPES:
+            # Retry in the same session — LLM already analyzed the task
+            original_value = task_type or "(no TASK_TYPE found in response)"
+            log(f"Classifier returned '{original_value}', retrying in same session...", "WARN")
+            
+            retry_msg = (
+                "Your previous response was not in the expected format.\n\n"
+                "Respond with EXACTLY these 4 lines, nothing else:\n\n"
+                "TASK_TYPE: <software-development or non-software or mixed>\n"
+                "DOMAIN_1: <primary-domain-slug>\n"
+                "DOMAIN_2: <supporting-domain-slug or NONE>\n"
+                "DOMAIN_3: <supporting-domain-slug or NONE>\n\n"
+                "IMPORTANT: TASK_TYPE must be one of exactly three values: software-development, non-software, mixed.\n"
+                "No explanation, no tables, no markdown — ONLY the 4 lines above."
+            )
+            
+            retry_text = await _send_and_collect(retry_msg)
+            _debug_log("llm_call", {
+                "system_prompt_preview": "classifier_retry",
+                "message_preview": retry_msg[:500],
+                "response_preview": retry_text[:1000],
+                "response_length": len(retry_text),
+                "model": model,
+            })
+            
+            retry_tt = re.search(r'TASK_TYPE:\s*(\S+)', retry_text, re.IGNORECASE)
+            retry_domains = re.findall(r'DOMAIN_\d+:\s*(\S+)', retry_text, re.IGNORECASE)
+            if retry_tt:
+                task_type = retry_tt.group(1).lower().strip()
+            if retry_domains:
+                domains = []
+                for i, d in enumerate(retry_domains):
+                    d = d.lower().strip()
+                    if d and d != "none":
+                        domains.append({"name": d, "role_in_task": "primary" if i == 0 else "supporting"})
+                domains = domains or SW_DEV_DOMAIN
+        
+        # If still invalid after retry, normalize from value
+        if not task_type or task_type not in VALID_TASK_TYPES:
+            sw_indicators = ("software", "engineering", "devops", "infrastructure", "build", "develop", "program", "implement", "deploy")
+            task_type_lower = (task_type or "").lower()
+            if any(kw in task_type_lower for kw in sw_indicators):
+                task_type = "software-development"
+            else:
+                task_type = "software-development"
+            log(f"Normalized task_type to '{task_type}'", "INFO")
+    except TimeoutError:
+        log("Classifier timed out, defaulting to software-development", "WARN")
+        task_type = "software-development"
+    finally:
+        await session.destroy()
+    
+    _debug_log("classify_result", {
+        "task_type": task_type,
+        "domains": domains,
+    })
+    
+    return TaskClassification(
+        task_type=task_type,
+        domains=domains,
+        interview_summary=interview_summary,
+    )
+
+
+def classify_from_domains_flag(domains_str: str, interview_summary: dict = None) -> 'TaskClassification':
+    """Create TaskClassification from --domains CLI flag.
+    
+    Infers task_type: "software-development" in domains → mixed, otherwise → non-software.
+    Raises ValueError if no valid domains provided.
+    """
+    domain_names = [d.strip() for d in domains_str.split(",") if d.strip()]
+    if not domain_names:
+        raise ValueError("At least one domain required when using --domains flag")
+    
+    has_sw = "software-development" in domain_names or "code" in domain_names
+    task_type = "mixed" if has_sw else "non-software"
+    
+    domains = []
+    for i, name in enumerate(domain_names):
+        domains.append({
+            "name": name,
+            "role_in_task": "primary" if i == 0 else "supporting",
+        })
+    
+    return TaskClassification(
+        task_type=task_type,
+        domains=domains,
+        interview_summary=interview_summary or {},
+    )
+
+
+async def generate_persona_file(client, model: str, skeleton: str, domain: str, role: str,
+                                 existing_roster: list, personas_dir: Path) -> tuple:
+    """Generate a persona .md file by having an LLM agent write it directly.
+    
+    The agent gets tools and writes the file itself — no JSON/frontmatter parsing needed.
+    File name is deterministic: {domain}-{role}.persona.md
+    Returns (filepath, meta_dict) or raises if the file wasn't created.
+    """
+    # Deterministic metadata — computed upfront, never parsed from file
+    persona_id = f"{domain}-{role.lower()}"
+    name = f"{domain.replace('-', ' ').title()} {role}"
+    mention = f"@{name.replace(' ', '')}"
+    filepath = personas_dir / f"{persona_id}.persona.md"
+    personas_dir.mkdir(parents=True, exist_ok=True)
+    
+    meta = {
+        'id': persona_id,
+        'name': name,
+        'domain': domain,
+        'role': role,
+        'mention': mention,
+        'filepath': filepath,
+    }
+    
+    # Remove stale file from prior failed attempt so LLM's create tool won't refuse
+    if filepath.exists():
+        filepath.unlink()
+    
+    system_prompt = (
+        f"You are a persona generator. Your ONLY job is to create a single persona file.\n\n"
+        + PERSONA_GENERATOR_PROMPT + "\n\n"  # Quality bar, role types (background context)
+        f"## CRITICAL INSTRUCTIONS\n\n"
+        f"1. Use the `create` tool to write the file to EXACTLY this path: {filepath}\n"
+        f"2. Fill EVERY {{placeholder}} in the template with domain-appropriate content\n"
+        f"3. Leave {{{{TEAM_ROSTER}}}} and {{{{CONVERSATION_CHECK_LINES}}}} as-is — they are runtime tokens\n"
+        f"4. Do NOT explain anything — just call the create tool with the file content\n"
+        f"5. Do NOT write your own format — use the EXACT template structure below\n\n"
+        f"## TEMPLATE (follow this structure exactly, fill in all {{placeholders}})\n\n"
+        f"```\n{skeleton}\n```"
+    )
+    
+    message = (
+        f"Create the persona file for a **{role}** in the **{domain}** domain.\n"
+        f"Existing team members (for awareness, avoid overlap): {', '.join(existing_roster) or 'none yet'}\n\n"
+        f"Write the file to: {filepath}"
+    )
+    
+    # Use a session WITH tools so the LLM can use `create`
+    session_config = _build_session_config(model, system_prompt, str(personas_dir.parent))
+    session = await client.create_session(session_config)
+    
+    done = asyncio.Event()
+    
+    def on_event(event):
+        if event.type.value == "session.idle":
+            done.set()
+        elif event.type.value == "session.error":
+            done.set()
+    
+    unsubscribe = session.on(on_event)
+    try:
+        await session.send({"prompt": message})
+        await asyncio.wait_for(done.wait(), timeout=180)
+    except asyncio.TimeoutError:
+        log(f"Persona generation timed out for {domain}/{role}", "WARN")
+    finally:
+        unsubscribe()
+        await session.destroy()
+    
+    # Verify the file was created — that's all we need
+    if not filepath.exists():
+        _debug_log("persona_gen_fail", {"domain": domain, "role": role, "reason": "file not created"})
+        raise ValueError(f"Persona generator did not create file for {domain}/{role} at {filepath}")
+    
+    _debug_log("persona_gen_ok", {"domain": domain, "role": role, "id": persona_id, "name": name})
+    log(f"Generated persona: {persona_id} ({domain}/{role}) → {filepath.name}", "OK")
+    return filepath, meta
+
+
+async def deduplicate_personas(client, model: str, persona_registry: dict, static_roster: list) -> dict:
+    """Analyze generated personas for overlap using an unbiased dedup agent.
+    
+    persona_registry: dict[str, dict] — keyed by persona id, value is meta dict with 'filepath'.
+    Reads FULL persona file contents (not summaries) to distinguish surface
+    overlap from real functional overlap. Returns recommendations dict with
+    'keep', 'drop', and 'merge' lists.
+    
+    On unparseable response, retries once in the same session so the LLM
+    has full context of its prior analysis and just needs to reformat.
+    """
+    # Build the full content payload for the dedup agent
+    persona_contents = []
+    for pid, meta in persona_registry.items():
+        filepath = Path(meta['filepath'])
+        content = filepath.read_text(encoding='utf-8')
+        persona_contents.append(f"### Persona: {pid} ({meta['domain']}/{meta['role']})\n```\n{content}\n```")
+    
+    static_section = f"## Static Team (cannot be dropped/merged)\n{', '.join(static_roster)}" if static_roster else ""
+    
+    message = (
+        f"{static_section}\n\n"
+        f"## Dynamic Personas to Analyze ({len(persona_registry)} personas)\n\n"
+        + "\n\n".join(persona_contents)
+        + "\n\nAnalyze these personas for overlap and provide keep/drop/merge recommendations."
+    )
+    
+    # Manage session manually so we can send a follow-up retry in the same context
+    session = await client.create_session({
+        "model": model,
+        "system_message": DEDUP_AGENT_PROMPT,
+    })
+    
+    async def _send_and_collect(msg: str) -> str:
+        parts = []
+        done = asyncio.Event()
+        def on_event(event):
+            if event.type.value == "assistant.message":
+                parts.append(event.data.content)
+            elif event.type.value == "session.idle":
+                done.set()
+        unsub = session.on(on_event)
+        try:
+            await session.send({"prompt": msg})
+            await asyncio.wait_for(done.wait(), timeout=120)
+        finally:
+            unsub()
+        return ''.join(parts)
+    
+    recommendations = None
+    
+    try:
+        response_text = await _send_and_collect(message)
+        _debug_log("llm_call", {
+            "system_prompt_preview": DEDUP_AGENT_PROMPT[:200],
+            "message_preview": message[:500],
+            "response_preview": response_text[:1000],
+            "response_length": len(response_text),
+            "model": model,
+        })
+        
+        text = _strip_code_fences(response_text)
+        try:
+            recommendations = json.loads(text)
+        except json.JSONDecodeError:
+            # Retry in the same session — LLM already has the full analysis context
+            log("Dedup agent returned non-JSON, retrying in same session...", "WARN")
+            _debug_log("dedup_parse_fail", {"raw": text[:2000], "attempt": 1})
+            
+            retry_msg = (
+                "Your previous response was not valid parseable JSON.\n\n"
+                "You MUST respond with ONLY a JSON object in this exact format:\n"
+                "```\n"
+                "{\n"
+                '  "keep": [\n'
+                '    {"id": "<persona-id>", "reason": "<why unique and needed>"}\n'
+                "  ],\n"
+                '  "drop": [\n'
+                '    {"id": "<persona-id>", "reason": "<why redundant>", "covered_by": "<id>"}\n'
+                "  ],\n"
+                '  "merge": [\n'
+                '    {"sources": ["<id-1>", "<id-2>"], "merged_name": "<name>", "reason": "<why>", "merge_guidance": "<what to keep>"}\n'
+                "  ]\n"
+                "}\n"
+                "```\n\n"
+                "Rules (still apply):\n"
+                "- Default to KEEP unless genuine functional overlap exists\n"
+                "- MERGE when two personas have significantly overlapping expertise\n"
+                "- DROP when one persona is strictly a subset of another\n"
+                "- Static team members cannot be dropped or merged\n"
+                "- Dynamic overlapping with static → DROP the dynamic one\n"
+                "- Be conservative: when in doubt, KEEP both\n\n"
+                "Reformat your analysis as the JSON object above. No markdown, no tables, no explanation — ONLY the JSON."
+            )
+            
+            retry_text = await _send_and_collect(retry_msg)
+            _debug_log("llm_call", {
+                "system_prompt_preview": "dedup_retry",
+                "message_preview": retry_msg[:500],
+                "response_preview": retry_text[:1000],
+                "response_length": len(retry_text),
+                "model": model,
+            })
+            
+            retry_cleaned = _strip_code_fences(retry_text)
+            try:
+                recommendations = json.loads(retry_cleaned)
+            except json.JSONDecodeError:
+                log(f"Dedup retry also failed, keeping all: {retry_cleaned[:200]}", "WARN")
+                _debug_log("dedup_parse_fail", {"raw": retry_cleaned[:2000], "attempt": 2})
+    except TimeoutError:
+        log("Dedup agent timed out, keeping all", "WARN")
+    finally:
+        await session.destroy()
+    
+    if recommendations is None:
+        keep_list = [{"id": pid, "reason": "dedup failed"} for pid in persona_registry]
+        return {"keep": keep_list, "drop": [], "merge": []}
+    
+    # Validate structure — ensure all values are lists
+    for key in ('keep', 'drop', 'merge'):
+        if key not in recommendations or not isinstance(recommendations[key], list):
+            recommendations[key] = []
+    
+    # Validate items — filter out entries missing required 'id' field
+    for key in ('keep', 'drop'):
+        recommendations[key] = [item for item in recommendations[key]
+                                if isinstance(item, dict) and item.get('id')]
+    recommendations['merge'] = [item for item in recommendations['merge']
+                                if isinstance(item, dict) and isinstance(item.get('sources'), list)
+                                and len(item['sources']) >= 2]
+    
+    keep_count = len(recommendations['keep'])
+    drop_count = len(recommendations['drop'])
+    merge_count = len(recommendations['merge'])
+    log(f"Dedup result: {keep_count} keep, {drop_count} drop, {merge_count} merge", "OK")
+    _debug_log("dedup_result", {"recommendations": recommendations})
+    
+    return recommendations
+
+
+MERGE_PROMPT = """You are a persona merger for a multi-agent collaboration system.
+
+You receive two persona files that overlap. Your job: read both, produce a SINGLE merged persona file that combines the best of both.
+
+Rules:
+- Preserve specific domain knowledge from BOTH sources — don't dilute
+- Merge engagement rules, satisfaction criteria, and non-negotiables (union, not intersection)
+- The merged persona should be MORE capable than either source alone
+- Non-negotiables, quality gates, and domain expertise from BOTH sources must survive the merge
+- Inherit domain and role from the primary source
+- The merged file MUST have valid YAML frontmatter with id, name, domain, role, mention
+"""
+
+
+async def execute_merges(client, model: str, merge_recs: list, persona_registry: dict,
+                          personas_dir: Path) -> tuple:
+    """Execute merge recommendations: have LLM agent read sources and write merged file.
+    
+    persona_registry: dict[str, dict] — keyed by persona id, value is meta dict with 'filepath'.
+    Returns (merged_metas, merged_source_ids) — new meta dicts and which source IDs were consumed.
+    """
+    merged_metas = []
+    merged_source_ids = set()
+    
+    for merge in merge_recs:
+        source_ids = merge.get('sources', [])
+        if len(source_ids) < 2:
+            continue
+        
+        if len(source_ids) > 2:
+            log(f"Merge of {len(source_ids)} personas not supported, using first 2: {source_ids[:2]}", "WARN")
+            source_ids = source_ids[:2]
+        
+        # Verify source files exist
+        source_paths = []
+        for sid in source_ids:
+            if sid in persona_registry:
+                path = Path(persona_registry[sid]['filepath'])
+                if path.exists():
+                    source_paths.append(path)
+        
+        if len(source_paths) < 2:
+            log(f"Merge skipped: not enough source files for {source_ids}", "WARN")
+            continue
+        
+        # Deterministic merged metadata — inherit domain from first source
+        merged_id = f"merged-{'-'.join(source_ids[:2])}"
+        merged_path = personas_dir / f"{merged_id}.persona.md"
+        primary_meta = persona_registry[source_ids[0]]
+        merged_name = merge.get('merged_name', '').strip()
+        if not merged_name:
+            merged_name = f"Merged {primary_meta['name']}"
+        merged_meta = {
+            'id': merged_id,
+            'name': merged_name,
+            'domain': primary_meta['domain'],
+            'role': primary_meta['role'],
+            'mention': f"@{merged_name.replace(' ', '')}",
+            'filepath': merged_path,
+        }
+        
+        if merged_path.exists():
+            merged_path.unlink()
+        
+        system_prompt = (
+            f"{MERGE_PROMPT}\n\n"
+            f"## Merge Guidance\n{merge.get('merge_guidance', 'Combine both personas')}\n\n"
+            f"Read the two source persona files, then use the `create` tool to write the merged persona to:\n"
+            f"{merged_path}\n\n"
+            f"The merged file must follow the same structure as the source files."
+        )
+        
+        message = (
+            f"Merge these two persona files into one:\n"
+            f"- Source 1: {source_paths[0]}\n"
+            f"- Source 2: {source_paths[1]}\n\n"
+            f"Read both files, then write the merged result to: {merged_path}"
+        )
+        
+        session_config = _build_session_config(model, system_prompt, str(personas_dir.parent))
+        session = await client.create_session(session_config)
+        
+        done = asyncio.Event()
+        def on_event(event):
+            if event.type.value in ("session.idle", "session.error"):
+                done.set()
+        
+        unsubscribe = session.on(on_event)
+        try:
+            await session.send({"prompt": message})
+            await asyncio.wait_for(done.wait(), timeout=180)
+        except asyncio.TimeoutError:
+            log(f"Merge timed out for {source_ids}", "WARN")
+        finally:
+            unsubscribe()
+            await session.destroy()
+        
+        if not merged_path.exists():
+            log(f"Merge failed for {source_ids}: file not created", "WARN")
+            continue
+        
+        merged_metas.append(merged_meta)
+        
+        # Delete originals and track consumed IDs
+        for sid in source_ids:
+            if sid in persona_registry:
+                Path(persona_registry[sid]['filepath']).unlink(missing_ok=True)
+                merged_source_ids.add(sid)
+                log(f"Deleted merged source: {sid}", "INFO")
+        
+        log(f"Merged {source_ids} → {merged_id}", "OK")
+    
+    return merged_metas, merged_source_ids
+
+
+async def assemble_team(client, model: str, classification: 'TaskClassification',
+                         workspace: 'Workspace', config: dict) -> list:
+    """Orchestrate full persona generation + dedup pipeline.
+    
+    Returns a list of team member dicts, each with:
+    id, name, promptFile, dynamic, domain, role, mention
+    """
+    DYNAMIC_PERSONA_CAP = 6
+    
+    # Pure software-development: return static team unchanged
+    if classification.task_type == "software-development":
+        static_team = []
+        for p in config.get('personas', []):
+            static_team.append({
+                'id': p['id'],
+                'name': p['name'],
+                'promptFile': str(SCRIPT_DIR / p['promptFile']),
+                'dynamic': False,
+                'domain': 'software-development',
+                'role': 'Doer',
+                'mention': f"@{p['name']}",
+            })
+        log(f"Pure software-development task: using {len(static_team)} static personas", "OK")
+        return static_team
+    
+    # Non-code or mixed: generate dynamic personas
+    personas_dir = workspace.artifacts_path / "dynamic-personas"
+    personas_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Build existing roster for awareness during generation
+    static_team = []
+    existing_roster = []
+    if classification.task_type == "mixed":
+        for p in config.get('personas', []):
+            static_team.append({
+                'id': p['id'],
+                'name': p['name'],
+                'promptFile': str(SCRIPT_DIR / p['promptFile']),
+                'dynamic': False,
+                'domain': 'software-development',
+                'role': 'Doer',
+                'mention': f"@{p['name']}",
+            })
+            existing_roster.append(p['name'])
+    
+    # Determine roles needed per domain (skip software-development domain — handled by static team)
+    non_sw_domains = [d for d in classification.domains if d['name'] not in ('software-development', 'code')]
+    
+    if not non_sw_domains:
+        # All domains are software-development but task_type says non-software — classifier inconsistency.
+        if classification.task_type == "non-software":
+            # Use all domains as-is since the classifier clearly got domains wrong
+            log("Non-software task but all domains are software-development — using domains as-is", "WARN")
+            non_sw_domains = classification.domains
+        else:
+            log("No non-software domains after filtering, using static team", "WARN")
+            return static_team if static_team else [{
+                'id': p['id'], 'name': p['name'],
+                'promptFile': str(SCRIPT_DIR / p['promptFile']),
+                'dynamic': False, 'domain': 'software-development', 'role': 'Doer',
+                'mention': f"@{p['name']}",
+            } for p in config.get('personas', [])]
+    
+    # Generate personas in parallel: Doer + Critic + Scope-keeper candidate per domain
+    generation_tasks = []
+    task_metadata = []  # Track domain/role for each task
+    
+    for domain_info in non_sw_domains:
+        domain = domain_info['name']
+        for role in ['Doer', 'Critic', 'Scope-keeper']:
+            generation_tasks.append(
+                generate_persona_file(client, model, PERSONA_SKELETON_TEMPLATE,
+                                       domain, role, existing_roster, personas_dir)
+            )
+            task_metadata.append({'domain': domain, 'role': role})
+    
+    log(f"Generating {len(generation_tasks)} personas in parallel...", "INFO")
+    results = await asyncio.gather(*generation_tasks, return_exceptions=True)
+    
+    # Error handling per plan: retry failed Doer once, skip failed Critic/Scope-keeper
+    # Build persona_registry: dict[id, meta] — the single source of truth for metadata
+    persona_registry = {}
+    failed_domains = set()
+    
+    for i, result in enumerate(results):
+        task_meta = task_metadata[i]
+        if isinstance(result, Exception):
+            if task_meta['role'] == 'Doer':
+                log(f"Doer generation failed for {task_meta['domain']}, retrying...", "WARN")
+                try:
+                    filepath, meta = await generate_persona_file(
+                        client, model, PERSONA_SKELETON_TEMPLATE,
+                        task_meta['domain'], 'Doer', existing_roster, personas_dir
+                    )
+                    persona_registry[meta['id']] = meta
+                except Exception as e2:
+                    log(f"Doer retry failed for {task_meta['domain']}, dropping domain: {e2}", "ERR")
+                    failed_domains.add(task_meta['domain'])
+            else:
+                log(f"{task_meta['role']} generation failed for {task_meta['domain']}, skipping: {result}", "WARN")
+        else:
+            filepath, meta = result
+            persona_registry[meta['id']] = meta
+    
+    # Remove personas from failed domains
+    if failed_domains:
+        persona_registry = {
+            pid: m for pid, m in persona_registry.items()
+            if m['domain'] not in failed_domains
+        }
+    
+    if not persona_registry:
+        log("All persona generation failed, falling back to static team", "ERR")
+        if static_team:
+            return static_team
+        return [{
+            'id': p['id'], 'name': p['name'],
+            'promptFile': str(SCRIPT_DIR / p['promptFile']),
+            'dynamic': False, 'domain': 'software-development', 'role': 'Doer',
+            'mention': f"@{p['name']}",
+        } for p in config.get('personas', [])]
+    
+    # Dedup
+    log("Deduplicating generated personas...", "INFO")
+    static_names = [p['name'] for p in static_team]
+    recommendations = await deduplicate_personas(client, model, persona_registry, static_names)
+    
+    # Drop recommended personas
+    for drop in recommendations.get('drop', []):
+        drop_id = drop.get('id')
+        if drop_id in persona_registry:
+            Path(persona_registry[drop_id]['filepath']).unlink(missing_ok=True)
+            del persona_registry[drop_id]
+            log(f"Dropped persona: {drop_id} — {drop.get('reason', 'overlap')}", "INFO")
+    
+    # Execute merges
+    merge_recs = recommendations.get('merge', [])
+    if merge_recs:
+        merged_metas, merged_source_ids = await execute_merges(
+            client, model, merge_recs, persona_registry, personas_dir
+        )
+        for sid in merged_source_ids:
+            persona_registry.pop(sid, None)
+        for merged_meta in merged_metas:
+            persona_registry[merged_meta['id']] = merged_meta
+    
+    # Elect Scope-keeper: primary domain's candidate wins
+    primary_domain = non_sw_domains[0]['name'] if non_sw_domains else None
+    scope_keeper_elected = False
+    scope_keeper_winner_id = None
+    scope_keeper_loser_ids = []
+    
+    for pid, meta in list(persona_registry.items()):
+        if meta['role'] == 'Scope-keeper':
+            if meta['domain'] == primary_domain and not scope_keeper_elected:
+                scope_keeper_elected = True
+                scope_keeper_winner_id = pid
+                log(f"Scope-keeper elected: {pid} (primary domain: {primary_domain})", "OK")
+            else:
+                scope_keeper_loser_ids.append(pid)
+    
+    # Inject domain awareness from losers into winner, then remove losers
+    if scope_keeper_loser_ids and scope_keeper_winner_id:
+        addendum_sections = []
+        for loser_id in scope_keeper_loser_ids:
+            loser_meta = persona_registry[loser_id]
+            loser_file = Path(loser_meta['filepath'])
+            content = loser_file.read_text(encoding='utf-8')
+            # Extract domain expertise section
+            expertise_match = re.search(
+                r'## Domain Expertise\s*\n(.*?)(?=\n## |\Z)', content, re.DOTALL
+            )
+            if expertise_match:
+                addendum_sections.append(
+                    f"### {loser_meta['domain'].replace('-', ' ').title()} Domain Awareness\n"
+                    f"{expertise_match.group(1).strip()}"
+                )
+            loser_file.unlink(missing_ok=True)
+            del persona_registry[loser_id]
+            log(f"Scope-keeper loser removed: {loser_id}", "INFO")
+        
+        if addendum_sections:
+            winner_file = Path(persona_registry[scope_keeper_winner_id]['filepath'])
+            winner_content = winner_file.read_text(encoding='utf-8')
+            addendum = "\n\n## Cross-Domain Awareness\n\n" + "\n\n".join(addendum_sections)
+            winner_content = winner_content.rstrip() + "\n" + addendum + "\n"
+            winner_file.write_text(winner_content, encoding='utf-8')
+            log(f"Injected {len(addendum_sections)} domain(s) awareness into {scope_keeper_winner_id}", "OK")
+    elif scope_keeper_loser_ids:
+        # No winner found — just remove losers
+        for loser_id in scope_keeper_loser_ids:
+            Path(persona_registry[loser_id]['filepath']).unlink(missing_ok=True)
+            del persona_registry[loser_id]
+            log(f"Scope-keeper loser removed (no winner): {loser_id}", "INFO")
+    
+    # Enforce cap of DYNAMIC_PERSONA_CAP
+    if len(persona_registry) > DYNAMIC_PERSONA_CAP:
+        domain_priority = {d['name']: i for i, d in enumerate(non_sw_domains)}
+        critics = [
+            (pid, meta)
+            for pid, meta in persona_registry.items()
+            if meta['role'] == 'Critic'
+        ]
+        critics.sort(key=lambda x: domain_priority.get(x[1]['domain'], 999), reverse=True)
+        
+        while len(persona_registry) > DYNAMIC_PERSONA_CAP and critics:
+            drop_pid, drop_meta = critics.pop(0)
+            Path(drop_meta['filepath']).unlink(missing_ok=True)
+            del persona_registry[drop_pid]
+            log(f"Cap overflow: dropped Critic {drop_pid}", "INFO")
+    
+    # Build final dynamic team roster — metadata comes from registry, not files
+    dynamic_team = []
+    for pid, meta in persona_registry.items():
+        dynamic_team.append({
+            'id': pid,
+            'name': meta['name'],
+            'promptFile': str(meta['filepath']),
+            'dynamic': True,
+            'domain': meta['domain'],
+            'role': meta['role'],
+            'mention': meta['mention'],
+        })
+    
+    combined = static_team + dynamic_team
+    log(f"Team assembled: {len(static_team)} static + {len(dynamic_team)} dynamic = {len(combined)} total", "OK")
+    _debug_log("team_assembled", {
+        "static": [{"id": p["id"], "domain": p.get("domain")} for p in static_team],
+        "dynamic": [{"id": p["id"], "domain": p.get("domain"), "role": p.get("role")} for p in dynamic_team],
+    })
+    return combined
 
 
 # ============================================================================
@@ -464,18 +1827,9 @@ async def run_verification(
         index_content = workspace.index_file.read_text(encoding='utf-8')
     
     # Create a session with tool access to the codebase
-    copilot_config_dir = Path.home() / ".copilot"
-    session_config = {
-        "model": model,
-        "system_message": VERIFICATION_AGENT_PROMPT,
-        "working_directory": str(workspace.path)
-    }
-    if copilot_config_dir.exists():
-        session_config["config_dir"] = str(copilot_config_dir)
-    if MCP_SERVERS_CONFIG:
-        session_config["mcp_servers"] = MCP_SERVERS_CONFIG
-    
-    session = await client.create_session(session_config)
+    session = await client.create_session(
+        _build_session_config(model, VERIFICATION_AGENT_PROMPT, str(workspace.path))
+    )
     
     verification_prompt = f"""# Verify Implementation Against Plan
 
@@ -549,11 +1903,9 @@ async def generate_handoff(
     """Generate user-facing handoff instructions after successful completion."""
     log("📋 Generating handoff instructions...", "INFO")
     
-    session = await client.create_session({
-        "model": model,
-        "system_message": HANDOFF_PROMPT,
-        "working_directory": str(workspace.path)
-    })
+    session = await client.create_session(
+        _build_session_config(model, HANDOFF_PROMPT, str(workspace.path))
+    )
     
     prompt = f"""The user's original request:
 {user_prompt}
@@ -603,31 +1955,27 @@ async def run_autonomous_agent(
     workspace: Workspace,
     plan_content: str,
     model: str,
-    is_first: bool = False
+    is_first: bool = False,
+    team_roster: list = None,
+    team_size: int = None
 ):
     """
     Run an agent autonomously.
     Agent reads conversation, decides when to speak, appends responses.
     """
-    system_prompt = load_persona_prompt(agent.id)
+    prompt_file = getattr(agent, 'prompt_file', None)
+    system_prompt = load_persona_prompt(
+        agent.id, prompt_file=prompt_file,
+        team_roster=team_roster, team_size=team_size
+    )
     
     # Create session with tools, working in the output directory
-    # Include MCP servers and user's Copilot config (skills, extensions)
-    copilot_config_dir = Path.home() / ".copilot"
-    session_config = {
-        "model": model,
-        "system_message": system_prompt,
-        "working_directory": str(workspace.path),  # Agent works in output directory
-        "infinite_sessions": {
-            "enabled": True,
-            "background_compaction_threshold": 0.80,
-            "buffer_exhaustion_threshold": 0.95,
-        }
+    session_config = _build_session_config(model, system_prompt, str(workspace.path))
+    session_config["infinite_sessions"] = {
+        "enabled": True,
+        "background_compaction_threshold": 0.80,
+        "buffer_exhaustion_threshold": 0.95,
     }
-    if copilot_config_dir.exists():
-        session_config["config_dir"] = str(copilot_config_dir)
-    if MCP_SERVERS_CONFIG:
-        session_config["mcp_servers"] = MCP_SERVERS_CONFIG
     
     session = await client.create_session(session_config)
     agent.session = session
@@ -790,7 +2138,7 @@ def extract_and_update_status(workspace: Workspace, agent_id: str, response: str
         try:
             reason = response.split("SATISFACTION_STATUS: BLOCKED -")[1].split("\n")[0].strip()
             update_satisfaction(workspace, agent_id, f"BLOCKED - {reason}")
-        except:
+        except (IndexError, ValueError):
             update_satisfaction(workspace, agent_id, "BLOCKED")
     elif "SATISFACTION_STATUS: PAUSED" in response:
         update_satisfaction(workspace, agent_id, "PAUSED - Awaiting human guidance")
@@ -1044,6 +2392,107 @@ Each phase file MUST have:
 Do NOT create vague tasks like "implement the feature". Be specific: "Create ISkillRepository interface with GetByIdAsync, ListAsync, SaveAsync methods"
 """
 
+DYNAMIC_PLAN_GENERATOR_PROMPT = """You are a plan generator that creates PHASED IMPLEMENTATION PLANS as SEPARATE FILES, adapted for the task type.
+
+## YOUR TASK
+
+You MUST create MULTIPLE FILES using the `create` tool. Do NOT put everything in one file.
+
+## TASK TYPE ADAPTATION
+
+The plan content and quality gates must match the task type:
+
+### For "software-development" tasks:
+- TDD approach, build commands, git commits, test runners
+- Quality gates: tests pass, builds succeed, code review done
+
+### For "non-software" tasks:
+- Domain-appropriate methodology (analysis framework, writing process, research protocol)
+- Deliverable-oriented phases, NOT implementation phases
+- Quality gates: peer review, methodology validation, deliverable completeness
+- NO references to: TDD, builds, git commits, test runners, CI/CD
+
+### For "mixed" tasks:
+- Code phases use code quality gates (TDD, builds, tests)
+- Non-code phases use domain quality gates (peer review, methodology validation)
+- Deliverable-oriented phase structure that integrates both
+
+## TEAM ROSTER
+
+The following team members will execute this plan:
+{team_roster}
+
+Reference team members by their @mentions in phase files where relevant (e.g., "This phase is primarily owned by @DataAnalyst with review from @DataReviewer").
+
+## REQUIRED FILES
+
+### File 1: `phases/_CONTEXT.md`
+Global context that applies to ALL phases:
+
+```markdown
+# [Project Name] - Global Context
+
+> **READ THIS FIRST** before working on any phase.
+
+## Original Ask (Verbatim)
+> [EXACT user prompt, word for word — do not paraphrase]
+
+## Problem Statement
+[What we're building/analyzing/writing and why — be specific and detailed]
+
+## Approach
+[Domain-appropriate methodology — TDD for code, analysis framework for data, etc.]
+
+## Key Decisions
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| [Decision 1] | [Choice] | [Why] |
+
+## Non-Negotiables
+- [Things that MUST NOT change]
+
+## Success Criteria
+- [ ] [Measurable criterion 1]
+- [ ] [Measurable criterion 2]
+
+## Validation
+[Domain-appropriate validation: build commands for code, review criteria for writing, etc.]
+
+## Output Structure
+- All deliverable files go in the **workspace root** (this directory's parent)
+- `phases/` is for plan files only — do NOT write deliverables here
+- `mandali-artifacts/` is for internal orchestration — do NOT write deliverables here
+```
+
+### File 2: `phases/_INDEX.md`
+Phase tracking table (same structure as standard plan)
+
+### Files 3+: `phases/phase-XX-name.md` (one per phase)
+Each phase in its own file with domain-appropriate tasks and quality gates.
+
+## DELIVERABLE OUTPUT PATHS
+
+CRITICAL: All deliverable files (reports, analyses, profiles, summaries, etc.) MUST be written to the **workspace root directory** (the working directory), NOT inside `mandali-artifacts/` or `phases/`.
+
+- `mandali-artifacts/` is reserved for internal orchestration files (conversation, decisions, debug logs). Agents must NEVER write deliverables there.
+- `phases/` is reserved for plan files only (_CONTEXT.md, _INDEX.md, phase-*.md).
+- Each phase file MUST specify concrete output file paths relative to the workspace root. Example: `Output: competitive-analysis-report.md` not `Output: mandali-artifacts/competitive-analysis-report.md`.
+
+Include this rule in the `_CONTEXT.md` under a "## Output Structure" section so all agents see it.
+
+## EXECUTION INSTRUCTIONS
+
+1. First, call `create` with path `phases/_CONTEXT.md` and the context content
+2. Then, call `create` with path `phases/_INDEX.md` and the index content
+3. Then, for EACH phase, call `create` with path `phases/phase-XX-name.md`
+
+You MUST create at least 3 files minimum. Each phase file MUST have 3-10 specific, actionable tasks with clear success criteria.
+
+## CRITICAL: ORIGINAL PROMPT PINNING
+
+The _CONTEXT.md file MUST include the user's EXACT original prompt in the "Original Ask (Verbatim)" section. Copy it WORD FOR WORD. This is the team's north star — every persona refers back to this to stay aligned with the user's actual intent.
+"""
+
 
 async def run_interview(client: CopilotClient, model: str, initial_prompt: str) -> dict:
     """Run interactive interview: generate questions upfront, walk through them, synthesize."""
@@ -1054,10 +2503,7 @@ async def run_interview(client: CopilotClient, model: str, initial_prompt: str) 
         title="🎤 AI INTERVIEWER", border_style="cyan"
     ))
     
-    session = await client.create_session({
-        "model": model,
-        "system_message": INTERVIEWER_PROMPT
-    })
+    session = await client.create_session(_build_session_config(model, INTERVIEWER_PROMPT))
     
     async def send_and_wait(prompt: str) -> str:
         """Send prompt and wait for response."""
@@ -1159,8 +2605,10 @@ async def run_interview(client: CopilotClient, model: str, initial_prompt: str) 
 
 async def generate_plan_from_interview(client: CopilotClient, model: str, 
                                         gathered_info: dict, initial_prompt: str,
-                                        out_path: Path) -> str:
-    """Generate a TDD + PoC structured plan from interview data."""
+                                        out_path: Path,
+                                        classification: 'TaskClassification' = None,
+                                        team_roster: list = None) -> str:
+    """Generate a phased plan from interview data, adapted for task type."""
     log("Generating phased plan...", "AGENT")
     
     # Ensure output directory and phases subfolder exist
@@ -1168,13 +2616,23 @@ async def generate_plan_from_interview(client: CopilotClient, model: str,
     phases_path = out_path / "phases"
     phases_path.mkdir(parents=True, exist_ok=True)
     
+    # Choose prompt based on task type
+    if classification and classification.task_type != "software-development":
+        # Format team roster for the dynamic prompt
+        roster_str = ""
+        if team_roster:
+            roster_str = "\n".join(f"- {m['mention']} ({m['name']} — {m.get('role', 'Doer')}, {m.get('domain', 'general')})" for m in team_roster)
+        else:
+            roster_str = "(Team roster not yet assembled)"
+        
+        system_prompt = DYNAMIC_PLAN_GENERATOR_PROMPT.replace("{team_roster}", roster_str)
+    else:
+        system_prompt = PLAN_GENERATOR_PROMPT
+    
     # Plan generator needs file access to create phase files
-    session = await client.create_session({
-        "model": model,
-        "system_message": PLAN_GENERATOR_PROMPT,
-        "working_directory": str(out_path)  # Work in the output directory
-        # No mcp_servers - plan generator just creates files
-    })
+    session = await client.create_session(
+        _build_session_config(model, system_prompt, str(out_path))
+    )
     
     # Build a detailed prompt with existing context if available
     existing_context = ""
@@ -1199,15 +2657,23 @@ async def generate_plan_from_interview(client: CopilotClient, model: str,
     if gathered_info.get("stop_after_phase"):
         resume_stop += f"## STOP after: {gathered_info['stop_after_phase']} (mark this clearly in _INDEX.md)\n"
     
+    classification_context = ""
+    if classification:
+        classification_context = f"""
+## Task Classification
+- **Type**: {classification.task_type}
+- **Domains**: {', '.join(d['name'] for d in classification.domains)}
+"""
+    
     prompt = f"""
-Generate a PHASED implementation plan with SEPARATE FILES.
+Generate a PHASED {'implementation' if not classification or classification.task_type == 'software-development' else 'execution'} plan with SEPARATE FILES.
 
-## Original Request
+## Original Request (include this VERBATIM in _CONTEXT.md under "Original Ask (Verbatim)")
 {initial_prompt}
 
 ## Gathered Information
 {json.dumps(gathered_info, indent=2)}
-{existing_context}{existing_phases}{completed}{resume_stop}
+{existing_context}{existing_phases}{completed}{resume_stop}{classification_context}
 
 ## CRITICAL INSTRUCTIONS
 
@@ -1310,11 +2776,9 @@ async def convert_to_phased_plan(client: CopilotClient, model: str,
     phases_path = out_path / "phases"
     phases_path.mkdir(parents=True, exist_ok=True)
     
-    session = await client.create_session({
-        "model": model,
-        "system_message": PLAN_GENERATOR_PROMPT,
-        "working_directory": str(out_path)
-    })
+    session = await client.create_session(
+        _build_session_config(model, PLAN_GENERATOR_PROMPT, str(out_path))
+    )
     
     prompt = f"""
 Convert the following plan into a PHASED implementation structure with SEPARATE FILES.
@@ -1411,14 +2875,11 @@ async def extract_plan_paths(client: CopilotClient, model: str, prompt: str) -> 
     """Use LLM to extract file/folder paths mentioned in a prompt."""
     log("Extracting file references from prompt...", "INFO")
     
-    session = await client.create_session({
-        "model": model,
-        "system_message": (
-            "You extract file and folder paths from text. "
-            "Return ONLY a JSON array of strings. No explanation, no markdown fencing. "
-            "Example: [\"phases/_INDEX.md\", \"docs/architecture.md\", \"src/Services/\"]"
-        )
-    })
+    session = await client.create_session(_build_session_config(model,
+        "You extract file and folder paths from text. "
+        "Return ONLY a JSON array of strings. No explanation, no markdown fencing. "
+        "Example: [\"phases/_INDEX.md\", \"docs/architecture.md\", \"src/Services/\"]"
+    ))
     
     response_parts = []
     done = asyncio.Event()
@@ -1520,15 +2981,12 @@ async def discover_plan_artifacts(
             break
         
         # Ask LLM to find referenced files
-        session = await client.create_session({
-            "model": model,
-            "system_message": (
-                "You analyze plan/context documents and extract file/folder paths referenced within. "
-                "Return ONLY a JSON array of strings. No explanation, no markdown fencing. "
-                "Look for paths in backticks, quotes, relative references, folder structures, "
-                "links, and prose descriptions. Include any file or folder an implementer would need."
-            )
-        })
+        session = await client.create_session(_build_session_config(model,
+            "You analyze plan/context documents and extract file/folder paths referenced within. "
+            "Return ONLY a JSON array of strings. No explanation, no markdown fencing. "
+            "Look for paths in backticks, quotes, relative references, folder structures, "
+            "links, and prose descriptions. Include any file or folder an implementer would need."
+        ))
         
         response_parts = []
         done = asyncio.Event()
@@ -1684,12 +3142,7 @@ async def review_plan(client: CopilotClient, model: str, plan_content: str) -> t
     """Review plan for unsupervised execution readiness."""
     log("Reviewing plan...", "INFO")
     
-    # Plan reviewer just provides text feedback, no tools needed
-    session = await client.create_session({
-        "model": model,
-        "system_message": PLAN_REVIEWER_PROMPT
-        # No working_directory or mcp_servers - reviewer just provides text feedback
-    })
+    session = await client.create_session(_build_session_config(model, PLAN_REVIEWER_PROMPT))
     
     response_parts = []
     done = asyncio.Event()
@@ -1799,7 +3252,7 @@ class AutonomousOrchestrator:
             if agent.session:
                 try:
                     await agent.session.destroy()
-                except:
+                except Exception:
                     pass
         self.agents.clear()
     
@@ -1810,11 +3263,37 @@ class AutonomousOrchestrator:
             await self.client.stop()
         log("Shutdown complete", "OK")
     
-    async def launch_agents(self, workspace: Workspace, plan_content: str):
-        """Launch all agents as background tasks."""
+    async def launch_agents(self, workspace: Workspace, plan_content: str,
+                             team_roster: list = None):
+        """Launch all agents as background tasks.
+        
+        If team_roster is provided, uses it instead of config['personas'].
+        team_roster entries: {id, name, mention, promptFile, dynamic, domain, role}
+        """
         self._workspace = workspace
         self._plan_content = plan_content
-        personas = self.config.get('personas', [])
+        
+        # Use team roster if provided, otherwise fall back to config
+        if team_roster:
+            personas = team_roster
+        else:
+            personas = []
+            for p in self.config.get('personas', []):
+                personas.append({
+                    'id': p['id'],
+                    'name': p['name'],
+                    'mention': f"@{p['name']}",
+                    'promptFile': str(SCRIPT_DIR / p['promptFile']),
+                    'dynamic': False,
+                    'domain': 'software-development',
+                    'role': 'Doer',
+                })
+        
+        team_size = len(personas)
+        
+        # Store for relaunch recovery
+        self._team_roster = personas
+        self._team_size = team_size
         
         # Query actual available models from SDK and show active model
         try:
@@ -1839,19 +3318,24 @@ class AutonomousOrchestrator:
             agent = PersonaAgent(
                 id=persona['id'],
                 name=persona['name'],
-                mention=f"@{persona['id'].capitalize()}"
+                mention=persona.get('mention', f"@{persona['id'].capitalize()}"),
+                prompt_file=persona.get('promptFile') if persona.get('dynamic') else None,
+                dynamic=persona.get('dynamic', False),
+                domain=persona.get('domain'),
             )
             
             # Launch as background task
             agent.task = asyncio.create_task(
                 run_autonomous_agent(
                     self.client, agent, workspace, plan_content,
-                    self.model, is_first=(i == 0)
+                    self.model, is_first=(i == 0),
+                    team_roster=personas, team_size=team_size
                 )
             )
             
             self.agents[persona['id']] = agent
-            log(f"Launched {agent.mention}", "AGENT")
+            dynamic_tag = " [dynamic]" if agent.dynamic else ""
+            log(f"Launched {agent.mention}{dynamic_tag}", "AGENT")
             
             # Stagger launches slightly
             await asyncio.sleep(2)
@@ -1981,15 +3465,18 @@ class AutonomousOrchestrator:
                 agent.task = asyncio.create_task(
                     run_autonomous_agent(
                         self.client, agent, self._workspace, self._plan_content,
-                        self.model, is_first=is_first
+                        self.model, is_first=is_first,
+                        team_roster=getattr(self, '_team_roster', None),
+                        team_size=getattr(self, '_team_size', None)
                     )
                 )
                 log(f"{agent.mention} relaunched", "OK")
     
-    async def monitor_loop(self, workspace: Workspace, max_stall_minutes: int = 5, is_final_round: bool = True):
+    async def monitor_loop(self, workspace: Workspace, max_stall_minutes: int = 5,
+                           is_final_round: bool = True, round_number: int = 1, total_rounds: int = 1):
         """
         Interactive passive monitoring loop.
-        - Shows periodic status updates
+        - Shows periodic status updates with phase progress ticker
         - Accepts user input at any time
         - Nudges agents if inactive (up to 3 times before human escalation)
         - Checks for victory and stalls
@@ -2010,6 +3497,17 @@ class AutonomousOrchestrator:
             "Type a message to interject, Ctrl+C to abort",
             title="📡 MONITORING", border_style="bright_blue"
         ))
+        
+        # Upfront expectation: show plan scope and verification info
+        phase_info = self._parse_phase_progress(workspace)
+        if phase_info:
+            total_phases = phase_info.split('/')[-1].split(' ')[0] if '/' in phase_info else '?'
+            verify_note = " | Expect 1-2 verification rounds" if total_rounds > 1 else ""
+            round_note = f" | Round {round_number}/{total_rounds}" if total_rounds > 1 else ""
+            console.print(f"  [dim]📋 Plan: {total_phases} phases{round_note}{verify_note}[/dim]")
+        
+        # Track last known phase state for ticker updates
+        last_phase_ticker = ""
         
         while True:
             # Non-blocking sleep with input check
@@ -2104,11 +3602,19 @@ Nudge {nudge_count}/{max_nudges} before human escalation.
                 status_line = " ".join(status_icons)
                 msgs = read_conversation(workspace).count("\n[")  # Count message lines
                 
+                # Build phase ticker from _INDEX.md
+                phase_ticker = self._build_phase_ticker(workspace)
+                
                 # Print status header
                 timestamp = now.strftime("%H:%M:%S")
                 status_table = Table(show_header=False, box=None, padding=(0, 1))
                 status_table.add_row(f"[dim]{timestamp}[/dim]", "📊", status_line, f"[dim]{msgs} msgs[/dim]")
                 console.print(status_table)
+                
+                # Print phase ticker if it changed
+                if phase_ticker and phase_ticker != last_phase_ticker:
+                    console.print(f"  [dim]📋[/dim] {phase_ticker}")
+                    last_phase_ticker = phase_ticker
                 
                 # Print recent conversation activity
                 if recent_messages:
@@ -2118,22 +3624,35 @@ Nudge {nudge_count}/{max_nudges} before human escalation.
             # Update metrics
             self.metrics.total_messages = read_conversation(workspace).count("\n[")
             
-            # Check for phase completions and nudge PM if DecisionsTracker wasn't updated
+            # Check for phase completions — match any agent announcing completion
             conversation_content = read_conversation(workspace)
             new_conversation = conversation_content[last_phase_check_pos:]
             if new_conversation:
                 phase_completions = re.findall(
-                    r'\[[\d:]+\]\s+@PM:.*?Phase\s+\d+\S*\s+[Cc]omplete',
+                    r'\[[\d:]+\]\s+@\w+:.*?Phase\s+\d+\S*\s+[Cc]omplete',
                     new_conversation, re.DOTALL
                 )
                 if phase_completions:
                     last_phase_check_pos = len(conversation_content)
+                    
+                    # Parse _INDEX.md and show progress to user
+                    phase_summary = self._parse_phase_progress(workspace)
+                    if phase_summary:
+                        log(phase_summary, "OK")
+                    
                     current_mtime = workspace.decisions_file.stat().st_mtime if workspace.decisions_file.exists() else 0
                     if current_mtime == decisions_mtime:
                         # DecisionsTracker hasn't been modified since last check
                         phases_str = f"{len(phase_completions)} phase(s)" if len(phase_completions) > 1 else "a phase"
+                        # Address the lead, not hardcoded @PM
+                        lead_agents = [a for a in self.agents.values() if a.id == 'pm']
+                        if not lead_agents:
+                            # Non-software task: find scope-keeper or first agent
+                            lead_agents = [a for a in self.agents.values() if a.domain and 'scope' in (a.domain or '').lower()]
+                        lead_mention = f"@{lead_agents[0].mention.lstrip('@')}" if lead_agents else "@Team"
+                        
                         append_to_conversation(workspace, "ORCHESTRATOR", f"""
-@PM - Completion of {phases_str} detected but DecisionsTracker.md has not been updated.
+{lead_mention} - Completion of {phases_str} detected but DecisionsTracker.md has not been updated.
 
 Before proceeding, verify whether any deviations from the plan occurred during the completed phase(s).
 If choices were made that differ from the plan or where the plan was silent, record them in:
@@ -2141,7 +3660,7 @@ If choices were made that differ from the plan or where the plan was silent, rec
 
 If no deviations occurred, acknowledge this and proceed.
 """)
-                        log(f"Nudged PM to check DecisionsTracker ({len(phase_completions)} phase(s))", "INFO")
+                        log(f"Nudged lead to check DecisionsTracker ({len(phase_completions)} phase(s))", "INFO")
                     else:
                         # DecisionsTracker was updated — record the new mtime
                         decisions_mtime = current_mtime
@@ -2158,6 +3677,106 @@ Before starting the next phase:
 2. Have you made assumptions about things the user didn't specify? (e.g., visual style, data format, defaults, error behavior) Record them in DecisionsTracker.md if not already done.
 3. Are there implicit expectations for this type of application that we haven't addressed yet?
 """)
+    
+    def _parse_phase_list(self, workspace: Workspace) -> list:
+        """Parse _INDEX.md and return list of (phase_num, name, status) tuples.
+        
+        Shared by _build_phase_ticker and _parse_phase_progress.
+        Returns empty list if _INDEX.md doesn't exist or can't be parsed.
+        """
+        if not workspace.index_file.exists():
+            return []
+        
+        try:
+            content = workspace.index_file.read_text(encoding='utf-8')
+        except OSError:
+            return []
+        
+        # Parse table rows: | Phase# | Name | Status | ...
+        rows = re.findall(
+            r'\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|',
+            content
+        )
+        # Also match "Phase# : Name" format: | 01: Name | file | Status | ...
+        if not rows:
+            rows = re.findall(
+                r'\|\s*(\d+):?\s*([^|]+?)\s*\|\s*[^|]*\|\s*([^|]+?)\s*\|',
+                content
+            )
+        
+        phases = []
+        for num, name, status in rows:
+            name = name.strip().rstrip('|')
+            status = status.strip()
+            # Skip rows from "Phase Files" reference table (status is a file link or empty)
+            if not status or status.startswith('[') or status.startswith('http'):
+                continue
+            phases.append((num.strip(), name, status))
+        
+        return phases
+    
+    def _build_phase_ticker(self, workspace: Workspace) -> str:
+        """Build a compact phase ticker line: ✅✅✅🔄⏳⏳ (3/6) | Phase 4: Analysis
+        
+        Returns empty string if no phases found.
+        """
+        phases = self._parse_phase_list(workspace)
+        if not phases:
+            return ""
+        
+        icons = []
+        active_name = ""
+        done_count = 0
+        for num, name, status in phases:
+            if '✅' in status or 'complete' in status.lower():
+                icons.append("✅")
+                done_count += 1
+            elif '🔄' in status or 'in progress' in status.lower():
+                icons.append("🔄")
+                if not active_name:
+                    active_name = f"Phase {num}: {name}"
+            else:
+                icons.append("⏳")
+        
+        ticker = "".join(icons) + f" ({done_count}/{len(phases)})"
+        if active_name:
+            ticker += f" | {active_name}"
+        
+        return ticker
+    
+    def _parse_phase_progress(self, workspace: Workspace) -> str:
+        """Parse _INDEX.md and return a one-line progress summary for the user.
+        
+        Returns e.g.: "Phase 2: Player Research done → Phase 3: Comparison next (3/7 complete)"
+        Returns empty string if _INDEX.md doesn't exist or can't be parsed.
+        """
+        phases = self._parse_phase_list(workspace)
+        if not phases:
+            return ""
+        
+        completed = [p for p in phases if '✅' in p[2] or 'complete' in p[2].lower()]
+        in_progress = [p for p in phases if '🔄' in p[2] or 'in progress' in p[2].lower()]
+        not_started = [p for p in phases if '⏳' in p[2] or 'not started' in p[2].lower()]
+        
+        total = len(phases)
+        done_count = len(completed)
+        
+        # Build summary: last completed → next up
+        parts = []
+        if completed:
+            last_done = completed[-1]
+            parts.append(f"Phase {last_done[0]}: {last_done[1]} done")
+        if in_progress:
+            current = in_progress[0]
+            parts.append(f"Phase {current[0]}: {current[1]} in progress")
+        elif not_started:
+            next_up = not_started[0]
+            parts.append(f"Phase {next_up[0]}: {next_up[1]} next")
+        
+        if not parts:
+            return ""
+        
+        return " → ".join(parts) + f" ({done_count}/{total} phases complete)"
     
     async def announce_victory(self, workspace: Workspace, is_final: bool = True):
         """Inject victory message. If not final, announce verification pending."""
@@ -2381,7 +4000,7 @@ def setup_worktree(out_path: Path) -> WorktreeResult:
                     log("Restored pending changes in original directory", "OK")
                     result.stash_ref = ""  # Stash consumed
                 else:
-                    log("Could not restore stash in original directory (stash preserved)", "WARN")
+                    log(f"Could not restore stash in original directory (stash preserved: {result.stash_ref})", "WARN")
             else:
                 log("Could not apply pending changes to worktree (continuing without them)", "WARN")
                 # Don't pop — leave stash intact so user can recover
@@ -2492,7 +4111,9 @@ def cleanup_worktree(wt: WorktreeResult):
 # Plan Generation Flow
 # ============================================================================
 
-async def run_generate_plan_flow(orchestrator, prompt: str, out_path: Path) -> Optional[str]:
+async def run_generate_plan_flow(orchestrator, prompt: str, out_path: Path,
+                                  classification: 'TaskClassification' = None,
+                                  team_roster: list = None) -> Optional[str]:
     """Run the generate-plan flow: Interview → Generate → Review.
     
     Returns plan_content on success, None on failure/rejection.
@@ -2508,9 +4129,13 @@ async def run_generate_plan_flow(orchestrator, prompt: str, out_path: Path) -> O
         log(f"Interview failed: {gathered_info['error']}", "ERR")
         return None
     
+    # Store interview info on orchestrator for later classification
+    orchestrator._interview_info = gathered_info
+    
     # Step 2: Generate plan (creates files in out_path)
     plan_content = await generate_plan_from_interview(
-        orchestrator.client, orchestrator.model, gathered_info, prompt, out_path
+        orchestrator.client, orchestrator.model, gathered_info, prompt, out_path,
+        classification=classification, team_roster=team_roster
     )
     
     if not plan_content:
@@ -2577,11 +4202,24 @@ async def run_generate_plan_flow(orchestrator, prompt: str, out_path: Path) -> O
         elif status == "needs_revision":
             console.print(Panel(
                 escape(result[:2000] + "..." if len(result) > 2000 else result),
-                title="📝 REVISED PLAN", border_style="bright_blue"
+                title="📝 PLAN REVIEW", border_style="bright_blue"
             ))
-            if not Confirm.ask("Use revised plan?", default=True):
+            if not Confirm.ask("Accept plan with these recommendations noted for agents?", default=True):
                 return None
-            plan_content = result
+            # Write review notes to a separate file for agents to read during Phase 0B
+            review_file = out_path / "mandali-artifacts" / "_REVIEW_NOTES.md"
+            review_file.parent.mkdir(parents=True, exist_ok=True)
+            review_file.write_text(
+                "# Plan Review Notes\n\n"
+                "These notes were generated by an automated review before execution began.\n"
+                "Address these points during Phase 0B design discussion.\n\n"
+                "---\n\n"
+                f"{result}\n",
+                encoding='utf-8'
+            )
+            # Store path so build_orchestrator_message can reference it
+            orchestrator._review_notes_path = str(review_file)
+            log(f"Review notes saved to {review_file}", "INFO")
             break
     
     return plan_content
@@ -2592,12 +4230,22 @@ async def run_generate_plan_flow(orchestrator, prompt: str, out_path: Path) -> O
 # ============================================================================
 
 async def async_main(args):
-    global MCP_SERVERS_CONFIG
+    global MCP_SERVERS_CONFIG, _debug_enabled, _debug_file
     
     config = load_config()
     
     # Load MCP server config for all sessions
     MCP_SERVERS_CONFIG = load_mcp_config()
+    
+    # Enable debug logging if requested
+    if getattr(args, 'debug', False):
+        _debug_enabled = True
+        # Debug file goes in out_path/mandali-artifacts/ once workspace is created
+        # For now, use a temp path; will be moved after workspace setup
+        debug_dir = args.out_path.resolve() / "mandali-artifacts"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        _debug_file = debug_dir / "debug.jsonl"
+        log(f"Debug logging enabled → {_debug_file}", "INFO")
     
     stall_timeout = getattr(args, 'stall_timeout', 5)
     max_retries = getattr(args, 'max_retries', 5)
@@ -2785,79 +4433,54 @@ async def async_main(args):
         else:
             plan_location = f"the plan in `{workspace.plan_file}`"
         
-        # Initialize conversation with Context Building + Round 0: Design Discussion
-        append_to_conversation(workspace, "ORCHESTRATOR", f"""
-@AllAgents - Welcome to Mandali!
-
-You are an autonomous team implementing {plan_location}
-
----
-
-## PHASE 0A: CONTEXT BUILDING (Before Design Discussion)
-
-Before discussing the design, each agent MUST build a complete understanding:
-
-### Required Actions for EACH Agent:
-1. **Read _CONTEXT.md FIRST** (if phased plan) - contains global architecture, security, non-negotiables
-2. **Read _INDEX.md** (if phased plan) - shows phase status and dependencies
-3. **Read the relevant phase file(s)** - understand tasks and quality gates
-4. **Explore the codebase** - understand project structure, patterns, conventions
-5. **Launch background agents** if needed to explore large codebases efficiently
-6. **Understand dependencies** - what exists, what needs to be built
-
-### Your Tools:
-- Use `view` to read files
-- Use `glob` and `grep` to explore the codebase
-- Use `task` tool with agent_type="explore" for parallel codebase exploration
-- Take your time - understanding the full picture is critical
-
-### When Ready:
-Each agent should post: "@Team - I have reviewed the plan and codebase. Ready for design discussion."
-
-**Wait for ALL agents to confirm readiness before starting design discussion.**
-
----
-
-## PHASE 0B: DESIGN DISCUSSION (After All Agents Ready)
-
-Once ALL agents confirm readiness, begin design discussion:
-
-1. **@PM**: Present the plan, clarify acceptance criteria, lead the discussion
-2. **@Security**: Raise ALL security concerns NOW (not during implementation)
-3. **@Dev**: Propose technical approach, identify risks, suggest phase adjustments
-4. **@QA**: Propose test strategy for each phase
-5. **@SRE**: Propose observability requirements
-
-**Rules for Design Discussion:**
-- ALL agents must participate and acknowledge the plan
-- @Security must approve the security approach BEFORE implementation begins
-- Team may reorder phases, add sub-phases, or adjust scope
-- @PM declares design complete with: "@Team design discussion complete, begin Phase 1"
-
----
-
-## Phased Plan Workflow (if using phases/ structure)
-
-After each phase is complete:
-1. @PM updates `_INDEX.md` with: ✅ Complete, commit hash
-2. @PM verifies `DecisionsTracker.md` has entries for any deviations made during this phase — if choices were made that differ from the plan or where the plan was silent, they must be recorded before moving on
-3. @PM announces: "@Team Phase X complete, proceeding to Phase Y"
-4. If plan says "STOP after Phase X", team stops and reports to human
-
----
-
-## Communication
-- Use @mentions: @Dev, @PM, @Security, @QA, @SRE, @Team, @AllAgents
-- End each message with SATISFACTION_STATUS
-
-## Victory Condition
-All agents SATISFIED = Implementation complete.
-
----
-
-@AllAgents - Begin by reading the plan and exploring the codebase. 
-Post when you're ready for design discussion.
-""")
+        # Classify task and assemble team (dynamic persona feature)
+        team_roster = None
+        classification = None
+        static_personas_flag = getattr(args, 'static_personas', False)
+        domains_flag = getattr(args, 'domains', None)
+        task_type = "software-development"  # default
+        
+        if not static_personas_flag:
+            if domains_flag:
+                # --domains overrides classifier
+                classification = classify_from_domains_flag(domains_flag)
+                task_type = classification.task_type
+                log(f"Task type (from --domains): {task_type}, domains: {[d['name'] for d in classification.domains]}", "INFO")
+            elif hasattr(orchestrator, '_interview_info') and orchestrator._interview_info:
+                # Classify from interview results
+                log("Classifying task type...", "INFO")
+                try:
+                    classification = await classify_task(
+                        orchestrator.client, orchestrator.model,
+                        prompt_context or "", orchestrator._interview_info
+                    )
+                    task_type = classification.task_type
+                    log(f"Task type: {task_type}, domains: {[d['name'] for d in classification.domains]}", "OK")
+                except Exception as e:
+                    log(f"Classification failed, defaulting to software-development: {e}", "WARN")
+                    classification = None
+                    task_type = "software-development"
+            
+            # Assemble team if non-software or mixed
+            if classification and task_type != "software-development":
+                log("Assembling domain-specific team...", "INFO")
+                try:
+                    team_roster = await assemble_team(
+                        orchestrator.client, orchestrator.model,
+                        classification, workspace, config
+                    )
+                except Exception as e:
+                    log(f"Team assembly failed, falling back to static team: {e}", "ERR")
+                    team_roster = None
+        
+        # Initialize conversation with dynamic orchestrator message
+        orch_message = build_orchestrator_message(
+            team_roster or [{'id': p['id'], 'name': p['name'], 'mention': f"@{p['name']}", 'role': 'Doer', 'domain': 'software-development'} for p in config.get('personas', [])],
+            plan_location,
+            task_type,
+            review_notes_path=getattr(orchestrator, '_review_notes_path', None)
+        )
+        append_to_conversation(workspace, "ORCHESTRATOR", orch_message)
         
         # If prompt context was provided, add it as additional guidance
         if prompt_context:
@@ -2874,7 +4497,11 @@ Use this alongside the plan files to guide your work.
         
         orchestrator.metrics.start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        agents_str = ", ".join([p['id'] for p in config['personas']])
+        # Build agents string from team roster or config
+        if team_roster:
+            agents_str = ", ".join([p['id'] for p in team_roster])
+        else:
+            agents_str = ", ".join([p['id'] for p in config['personas']])
         
         # ============================================================
         # VERIFICATION LOOP: Trust but Verify
@@ -2919,13 +4546,15 @@ Begin by reviewing the gaps and the codebase, then work to close them.
 """)
             
             # Launch agents
-            await orchestrator.launch_agents(workspace, plan_content)
+            await orchestrator.launch_agents(workspace, plan_content, team_roster=team_roster)
             
             # Monitor loop — always announce "proceeding to verification" when verification is enabled
             success = await orchestrator.monitor_loop(
                 workspace,
                 max_stall_minutes=stall_timeout,
-                is_final_round=(max_retries == 0)
+                is_final_round=(max_retries == 0),
+                round_number=round_number,
+                total_rounds=total_rounds,
             )
             
             if not success:
@@ -3166,6 +4795,37 @@ Satisfaction Criteria:
   • System starts successfully and health endpoints respond
 """
     },
+    "dynamic": {
+        "title": "Dynamic Personas — Task-Adaptive Team Assembly",
+        "short": "Domain specialists generated to match non-code and mixed tasks",
+        "detail": """
+When It Activates:
+  • Non-code tasks (data analysis, research, writing, etc.)
+  • Mixed tasks (code + other domains)
+  • NOT used when --static-personas is set
+
+How It Works:
+  • Mandali reads the task and identifies which domains need expertise
+  • Each domain gets adversarial coverage: a builder and a challenger
+  • Cross-domain tasks get an additional coordinator for coherence
+  • Generated personas carry the same behavioral depth as the static team:
+    engagement rules, satisfaction criteria, conflict resolution protocols
+
+Behavioral Contract:
+  • Same @mention protocol as static personas
+  • Same satisfaction tracking (WORKING / BLOCKED / SATISFIED)
+  • Same conflict resolution (tie-breaker authority, 2-strike rule)
+  • Same verification loop applies after all agents declare SATISFIED
+
+Override Options:
+  • --static-personas    Force the code team regardless of task type
+  • --domains <list>     Specify domains manually (skips auto-detection)
+                         e.g., --domains analytics,writing
+
+Generated persona files are stored in:
+  <out-path>/mandali-artifacts/dynamic-personas/*.persona.md
+"""
+    },
 }
 
 
@@ -3187,15 +4847,22 @@ def show_persona_description(persona_id: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Mandali — a circle of specialized AI agents that deliberate and act together",
+        description="Mandali — assembles the right team for any task, then makes them argue about it until the work is actually good",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Personas:
-  dev        Senior Developer — implementation, code quality, TDD, creative problem-solving
-  security   Security Architect — threat modeling, secure defaults, least privilege
-  pm         Product Manager — acceptance criteria, progress tracking, user delight
-  qa         Quality Assurance — testing, edge cases, user journey validation
-  sre        Site Reliability Engineer — observability, debuggability, failure modes
+  Mandali assembles a team to match the task.
+
+  Code tasks get the hand-tuned code team:
+    dev        Senior Developer -- implementation, code quality, TDD
+    security   Security Architect -- threat modeling, secure defaults
+    pm         Product Manager -- acceptance criteria, progress tracking
+    qa         Quality Assurance -- testing, edge cases, user journeys
+    sre        Site Reliability Engineer -- observability, failure modes
+
+  Non-code and mixed tasks get generated domain specialists with the same
+  behavioral depth. Use --static-personas to force the code team, or
+  --domains to specify which domains need coverage.
 
 Workspace Isolation:
   If --out-path is inside a git repo, Mandali automatically creates a git worktree
@@ -3210,6 +4877,7 @@ Verification (Trust but Verify):
 
 Use --describe <persona> for detailed information about a specific persona.
 Example: python mandali.py --describe dev
+         python mandali.py --describe dynamic
 """
     )
     
@@ -3228,9 +4896,16 @@ Example: python mandali.py --describe dev
     parser.add_argument('--max-retries', type=int, default=5,
                         help='Max verification-relaunch cycles after victory (0 = no verification, default: 5)')
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--debug', action='store_true', 
+                        help='Log all LLM requests/responses to mandali-artifacts/debug.jsonl')
     parser.add_argument('--version', action='version', version=f'mandali {__version__}')
     parser.add_argument('--describe', type=str, metavar='PERSONA',
-                        help='Show detailed description of a persona (dev, security, pm, qa, sre)')
+                        help='Show detailed description of a persona (dev, security, pm, qa, sre, dynamic)')
+    parser.add_argument('--static-personas', action='store_true', default=False,
+                        help='Force static code team (skip task classification). --domains is ignored.')
+    parser.add_argument('--domains', type=str, default=None,
+                        help='Comma-separated domain list (e.g., analytics,writing). Overrides classifier. '
+                             'Infers task_type: no "software-development" → non-software, "software-development" present → mixed.')
     
     args = parser.parse_args()
     
