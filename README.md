@@ -69,6 +69,8 @@ Mandali checks for updates on each launch and notifies you when a newer version 
 | `--static-personas` | No | Force the static code team, skip task classification |
 | `--domains <list>` | No | Comma-separated domain list (e.g., `analytics,writing`). Overrides classifier |
 | `--describe <persona>` | No | Show detailed description of a persona |
+| `--teams` | No | Enable Teams integration for notifications and remote replies |
+| `--setup-teams` | No | One-time setup: provision Azure Bot + cloud relay for Teams |
 
 ---
 
@@ -142,6 +144,32 @@ When `--out-path` is inside a git repo, Mandali creates a **worktree** so agents
 ## MCP Servers & Extensions
 
 Mandali loads MCP server configuration from `~/.copilot/mcp-config.json` (or `.copilot/mcp-config.json` in the project). All configured servers — databases, browsers, APIs, specialized tools — are available to every agent. User-installed Copilot skills and extensions are passed through automatically.
+
+---
+
+## Teams Integration
+
+Monitor agent progress and provide guidance from Microsoft Teams — no terminal required.
+
+```bash
+# 1. Provision Azure resources (~3 minutes)
+mandali --setup-teams
+
+# 2. Upload the generated mandali-bot.zip to Teams Admin Center
+
+# 3. Run with Teams enabled
+mandali --plan phases/_INDEX.md --out-path ./output --teams
+```
+
+**How it works:** You message the Mandali bot in Teams → Azure Bot Service → cloud relay (App Service) → WebSocket → your running Mandali instance. Your message is injected into `conversation.txt` as `@HUMAN` guidance. Agent responses are posted back to your Teams thread.
+
+| Resource | SKU | Cost |
+|----------|-----|------|
+| Azure Bot | F0 | Free |
+| App Service (relay) | B1 Linux | ~$13/mo |
+| User-Assigned MSI | — | Free |
+
+Config is saved to `~/.copilot/mandali-teams.json`. Requires Azure CLI (`az`) with an active subscription.
 
 ---
 
