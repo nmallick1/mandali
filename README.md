@@ -2,11 +2,24 @@
 
 > *Mandali (मंडली, pronounced "mun-da-lee") — Sanskrit: a circle of specialists that deliberates and acts together*
 
-Autonomous multi-agent collaborative development system using GitHub Copilot SDK
+Autonomous multi-agent system that assembles the right team for any task — then makes them argue about it until the work is actually good. Built on the GitHub Copilot SDK.
+
+---
+
+## How It Works
+
+You describe what you want. Mandali figures out the rest.
+
+1. **Classifies the task** — code, research, analysis, writing, or a mix
+2. **Assembles a team** — hand-tuned code specialists for software, generated domain experts for everything else
+3. **Agents discuss the plan** before executing — catching misalignment early, not after hours of work
+4. **Agents execute autonomously** — coordinating through @mentions, using real tools (not simulations)
+5. **Verifies the result** — a separate verification agent compares plan vs actual output before declaring done
+6. **You can interject at any time** — but you don't have to. The team works without supervision
+
+---
 
 ## Prerequisites
-
-Before using Mandali, ensure the following are installed:
 
 | Requirement | How to install |
 |-------------|---------------|
@@ -15,7 +28,6 @@ Before using Mandali, ensure the following are installed:
 | **GitHub Copilot CLI** | `winget install GitHub.Copilot` or `npm install -g @github/copilot` |
 | **GitHub Copilot license** | Active Copilot Individual, Business, or Enterprise subscription |
 
-**Verify your setup:**
 ```bash
 python --version      # 3.10 or higher
 copilot --version     # Should print the CLI version
@@ -27,507 +39,109 @@ copilot --version     # Should print the CLI version
 
 ## Quick Start
 
-### Install
-
 ```bash
-# Option A: Install as a command (recommended)
+# Install
 pip install git+https://github.com/nmallick1/mandali.git
 
-# Option B: Clone and run directly
-git clone https://github.com/nmallick1/mandali.git
-cd mandali
-pip install -r requirements.txt
+# Launch with an existing plan
+mandali --plan phases/_INDEX.md --out-path ./output
+
+# Or generate a plan from scratch
+mandali --prompt "Analyze the competitive landscape for AI code review tools" --generate-plan --out-path ./output
 ```
 
 Mandali checks for updates on each launch and notifies you when a newer version is available.
 
-### Run
-
-```bash
-# If installed via pip (Option A):
-mandali --plan phases/_INDEX.md --out-path ./output
-
-# If cloned (Option B):
-python mandali.py --plan phases/_INDEX.md --out-path ./output
-
-# Generate a NEW plan from scratch via interview
-mandali --prompt "Add caching to the API layer" --generate-plan --out-path ./output
-
-# Control verification retries (default: 5, set 0 to disable verification)
-mandali --plan phases/_INDEX.md --out-path ./output --max-retries 3
-```
-
 ---
 
-## MCP Server Configuration
-
-The orchestrator automatically loads MCP server configuration from:
-1. `~/.copilot/mcp-config.json` (user config - primary)
-2. `.copilot/mcp-config.json` (project config - fallback)
-
-The orchestrator also passes the user's `~/.copilot` config directory to agent sessions, so locally installed **skills and extensions** are available to all persona agents.
-
-### Example mcp-config.json
-
-```json
-{
-  "mcpServers": {
-    "aspire": {
-      "type": "local",
-      "command": "aspire",
-      "args": ["mcp", "start"],
-      "tools": ["*"]
-    },
-    "playwright": {
-      "type": "local",
-      "command": "npm",
-      "args": ["exec", "--yes", "--", "@playwright/mcp@latest"],
-      "tools": ["*"]
-    }
-  }
-}
-```
-
-Agents will have access to all configured MCP servers, enabling them to:
-- Query databases
-- Browse web pages
-- Interact with APIs
-- Access specialized development tools
-
----
-
-## Phased Plan Structure (Recommended for Large Projects)
-
-For large projects, plans are split into multiple files to prevent context loss:
-
-```
-<out-path>/
-├── phases/
-│   ├── _CONTEXT.md           # Global context (READ FIRST)
-│   │                         # Architecture, security, non-negotiables
-│   ├── _INDEX.md             # Phase tracking table with status
-│   │                         # Agents update this after each phase
-│   ├── phase-01-foundation.md
-│   ├── phase-02-core.md
-│   ├── phase-03-feature.md
-│   └── ...
-└── mandali-artifacts/        # Orchestration files (auto-created)
-    ├── conversation.txt
-    ├── satisfaction.txt
-    └── DecisionsTracker.md
-```
-
-### Why Phased Files?
-
-| Single File Plan | Phased File Structure |
-|------------------|----------------------|
-| Context lost in long documents | Each phase is self-contained |
-| Easy to miss tasks | Clear task numbering (XX.Y) |
-| Hard to track progress | _INDEX.md shows status |
-| Agents forget constraints | _CONTEXT.md always available |
-
-### File Purposes
-
-| File | Purpose |
-|------|---------|
-| `_CONTEXT.md` | **Read first** - Architecture, security, non-negotiables that apply to ALL phases |
-| `_INDEX.md` | **Tracking** - Phase table with status, commits, dependencies |
-| `phase-XX-*.md` | **Implementation** - Detailed tasks for one phase with quality gates |
-
----
-
-## Usage
-
-### Command Line Arguments
-
-```bash
-python mandali.py [OPTIONS]
-```
+## CLI Reference
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `--out-path <path>` | **Yes** | Output directory where Mandali creates files. If inside a git repo, a worktree is created automatically for isolation |
-| `--plan <path>` | One of plan/prompt | Path to existing plan (_INDEX.md or single plan.md) |
-| `--prompt <text>` | One of plan/prompt | Prompt with instructions and references to plan files |
-| `--generate-plan` | No (default: off) | Opt-in: run interview + plan generation instead of direct launch |
-| `--stall-timeout <minutes>` | No (default: 5) | Minutes of inactivity before human escalation |
-| `--max-retries <n>` | No (default: 5) | Max verification rounds after all agents SATISFIED. Set 0 to disable |
+| `--out-path <path>` | **Yes** | Output directory. If inside a git repo, a worktree is created for isolation |
+| `--plan <path>` | One of plan/prompt | Path to existing plan (`_INDEX.md` or single `plan.md`) |
+| `--prompt <text>` | One of plan/prompt | Task description or prompt referencing plan files |
+| `--generate-plan` | No | Run interview → plan generation → review before launching agents |
+| `--stall-timeout <min>` | No (default: 5) | Minutes of inactivity before human escalation |
+| `--max-retries <n>` | No (default: 5) | Verification rounds after agents complete. Set 0 to disable |
 | `--verbose` | No | Show detailed status updates |
-| `--describe <persona>` | No | Show detailed description of a persona (dev, security, pm, qa, sre) |
-
-### Examples
-
-```bash
-# Direct launch with existing plan file
-python mandali.py --plan ./phases/_INDEX.md --out-path ./output
-
-# Direct launch with prompt referencing existing files
-python mandali.py --prompt "Read phases/_CONTEXT.md and phases/_INDEX.md. Complete all phases." --out-path ./output
-
-# Generate a NEW plan from scratch (opt-in)
-python mandali.py --prompt "Add Redis caching for API responses" --generate-plan --out-path ./output/redis-caching
-
-# Longer timeout for complex tasks
-python mandali.py --plan phases/_INDEX.md --out-path ./output --stall-timeout 10
-```
-
-### What is `--stall-timeout`?
-
-The `--stall-timeout` option controls how long the orchestrator waits before escalating to a human when agents stop making progress.
-
-| Value | Behavior |
-|-------|----------|
-| `5` (default) | After 5 minutes of no conversation activity, pause agents and ask human for guidance |
-| `10` | More patient - good for complex implementations where agents may take longer |
-| `2` | Aggressive - escalate quickly if you want tight human oversight |
-
-**When stall is detected:**
-1. Orchestrator injects: `@AllAgents - Escalating to @HUMAN for guidance`
-2. All agents pause and update status to `PAUSED`
-3. Human is presented with options:
-   - Provide guidance (relayed to agents)
-   - View recent conversation
-   - Abort
+| `--debug` | No | Log all LLM requests/responses for diagnostics |
+| `--static-personas` | No | Force the static code team, skip task classification |
+| `--domains <list>` | No | Comma-separated domain list (e.g., `analytics,writing`). Overrides classifier |
+| `--describe <persona>` | No | Show detailed description of a persona |
 
 ---
 
 ## Modes
 
-### Default: Direct Launch (no `--generate-plan`)
-
-By default, the orchestrator **skips** interview, plan generation, and AI review. It assumes you already have plan files ready.
-
-#### With `--plan`
-
-Reads the plan file, uses LLM to discover all referenced artifacts (up to 5 levels deep), copies them to the workspace, and launches agents.
+**Direct launch** (default) — You already have plan files. Mandali discovers referenced artifacts, copies them to the workspace, and launches agents.
 
 ```bash
-python mandali.py --plan ./phases/_INDEX.md --out-path ./output
+mandali --plan ./phases/_INDEX.md --out-path ./output
+mandali --prompt "Read phases/_CONTEXT.md and phases/_INDEX.md. Start from Phase 3." --out-path ./output
 ```
 
-#### With `--prompt`
-
-The LLM extracts file/folder paths mentioned in your prompt, reads those files, recursively discovers any files they reference (up to 5 levels), copies everything to the workspace, and launches agents. Your prompt is passed as additional context alongside the plan.
+**Plan generation** (`--generate-plan`) — Mandali interviews you, generates a phased plan, lets you review and edit it, then launches agents.
 
 ```bash
-python mandali.py --prompt "Read phases/_CONTEXT.md and phases/_INDEX.md. Start from Phase 3." --out-path ./my-project
+mandali --prompt "Add rate limiting to the API" --generate-plan --out-path ./output
 ```
-
-**What happens:**
-1. 🔍 LLM extracts paths: `phases/_CONTEXT.md`, `phases/_INDEX.md`
-2. 🔍 Reads those files, discovers nested references (depth 1/5, 2/5, ...)
-3. 📁 Copies all artifacts to workspace
-4. ✅ Shows you what was found — you confirm or reject
-5. 🚀 Launches agents with plan + prompt as context
-
-#### Prompt Tips
-
-Reference your plan files explicitly in the prompt:
-- ✅ `"Read phases/_CONTEXT.md and phases/_INDEX.md. Complete all phases."`
-- ✅ `"Follow the plan in phases/_INDEX.md. Start from Phase 3."`
-- ❌ `"Continue the implementation"` (no file references — orchestrator won't find plan files)
-
-### Opt-in: Plan Generation (`--generate-plan`)
-
-Add `--generate-plan` to trigger the full interview and plan generation flow. Only works with `--prompt`.
-
-1. **AI Interviewer** - Asks clarifying questions about scope, phases, existing context
-2. **Plan Generation** - Creates phased file structure (_CONTEXT.md, _INDEX.md, phase-XX.md files)
-3. **User Approval** - Shows plan directory, you review/edit externally, then accept or reject
-4. **Plan Review** - AI validates phased structure
-5. **Agent Launch** - 5 personas begin autonomous work
-
-```bash
-python mandali.py --prompt "Add rate limiting to the API" --generate-plan --out-path ./output
-```
-
----
-
-## Workspace Isolation (Git Worktrees)
-
-When `--out-path` points to a directory inside a git repository, Mandali automatically creates a **git worktree** in a sibling directory. Agents work entirely in the worktree — your original directory is never touched.
-
-```
-myproject/                        ← your repo (untouched)
-myproject-mandali-20260210-053400/ ← worktree (agents work here)
-```
-
-**What happens:**
-1. Mandali detects `--out-path` is inside a git repo
-2. Creates a branch `mandali/session-<timestamp>`
-3. Creates a worktree at `<parent>/<dirname>-mandali-<timestamp>/`
-4. Redirects all agent work to the worktree
-5. After the run, shows instructions to merge or discard
-
-**After the run:**
-```bash
-# Review what agents changed
-git diff main..mandali/session-20260210-053400
-
-# Keep the changes
-cd myproject
-git merge mandali/session-20260210-053400
-
-# Or discard everything
-git worktree remove ../myproject-mandali-20260210-053400
-git branch -D mandali/session-20260210-053400
-```
-
-**When `--out-path` is NOT inside a git repo**, no worktree is created and agents work directly in the specified directory (same as before).
-
----
-
-## Interactive Monitoring
-
-While agents work, you see periodic status updates:
-
-```
-[14:32:15] 📊 ✅dev 🔧sec ⏳pm ⏳qa ⏳sre | 12 msgs
-           └─ @Dev: Implementing Phase 1 task 1.1, writing tests first...
-```
-
-**Status icons:**
-| Icon | Meaning |
-|------|---------|
-| ✅ | SATISFIED - Agent's criteria are met |
-| 🔧 | WORKING - Agent is actively working |
-| 🔴 | BLOCKED - Agent is blocked on something |
-| ⏳ | Waiting - Agent is waiting for others |
-
-**You can type a message at any time** to interject. Your message is injected as:
-```
-@AllAgents - Human says:
-[your message]
-```
-
-All agents will see and respond to your guidance.
-
----
-
-## Agent Communication
-
-### Protocol
-
-| Mention | Meaning |
-|---------|---------|
-| `@Dev` | Addressing Developer |
-| `@Security` | Addressing Security Architect |
-| `@PM` | Addressing Product Manager |
-| `@QA` | Addressing QA Engineer |
-| `@SRE` | Addressing SRE |
-| `@Team` or `@AllAgents` | Addressing everyone |
-| `@HUMAN` | Human arbiter (injected by orchestrator) |
-
-### Turn-Taking Rules
-
-1. **When to speak:**
-   - You are @mentioned
-   - Discussion is in your domain (security issue → @Security speaks)
-   - You have concerns about current work
-   - Handoff to you: "@QA please test"
-
-2. **When to stay quiet:**
-   - You're not mentioned and it's not your domain
-   - Implementation is in progress (unless you spot an issue)
-   - Your feedback was already addressed
-
-### conversation.txt Format
-
-```
-[21:15:00] @PM: @Team - I've reviewed the plan. Acceptance criteria look clear.
-@Dev, you can start with Phase 1. SATISFACTION_STATUS: WORKING
-
-[21:16:30] @DEV: @PM - Acknowledged. Starting Phase 1 implementation.
-Creating SkillParser.cs... @QA - Ready for testing when available.
-SATISFACTION_STATUS: WORKING
-
-[21:18:00] @SECURITY: @Dev - Quick concern on line 45. You're not validating
-the input path. This could allow path traversal. Please add validation.
-SATISFACTION_STATUS: BLOCKED - Path traversal vulnerability
-```
-
----
-
-## Agent Lifecycle
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                     AGENT LIFECYCLE                          │
-├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│  1. LAUNCH                                                   │
-│     Orchestrator creates session with:                       │
-│     - System prompt (persona definition)                     │
-│     - Plan artifacts (phased or single-file)                 │
-│     - MCP servers (from ~/.copilot/mcp-config.json)          │
-│     - User's Copilot config (skills, extensions)             │
-│     - Model verified via SDK list_models()                   │
-│                                                              │
-│  2. INTRODUCTION                                             │
-│     Agent introduces self, appends to conversation.txt       │
-│                                                              │
-│  3. WORK LOOP (autonomous)                                   │
-│     While not terminated:                                    │
-│       - Read conversation.txt (new entries since last read)  │
-│       - Decide if should respond                             │
-│       - If yes: do work, append response                     │
-│       - Update satisfaction status                           │
-│       - Check for @ORCHESTRATOR messages                     │
-│                                                              │
-│  4. PAUSE (on escalation)                                    │
-│     - Finish atomic work                                     │
-│     - Update status to PAUSED                                │
-│     - Wait for @HUMAN message                                │
-│                                                              │
-│  5. TERMINATE (on victory or abort)                          │
-│     - Acknowledge completion                                 │
-│     - Session destroyed by orchestrator                      │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Human Escalation Flow
-
-**Trigger:** No conversation activity for N minutes, or agent requests `@HUMAN`.
-
-**Escalation message (injected by orchestrator):**
-```
-@AllAgents - Escalating to @HUMAN for guidance.
-Please pause your current work. Wait for human input before continuing.
-
-Current status:
-- @Dev: WORKING
-- @Security: BLOCKED - Disagreement on encryption approach
-- @PM: SATISFIED
-- @QA: WORKING
-- @SRE: SATISFIED
-```
-
-**Agents respond by:**
-1. Finishing any atomic operation
-2. Updating status to `PAUSED - Awaiting human guidance`
-3. Stopping until human responds
-
-**Human response (injected by orchestrator):**
-```
-@AllAgents - Human guidance:
-Use AES-256-GCM. This is a company standard.
-@Security, update requirements. @Dev, proceed with this approach.
-```
-
-Agents acknowledge, update status to WORKING/SATISFIED, and continue.
-
----
-
-## Prior Art Acknowledgment
-
-This system implements the **multi-agent collaborative development pattern**, which is an established approach in AI research. Key prior art includes:
-
-| Framework | Year | Contribution |
-|-----------|------|--------------|
-| **Society of Mind** (Minsky) | 1986 | Theoretical foundation - intelligence emerges from agent interaction |
-| **CAMEL** | 2023 | Debate-based agents that challenge each other |
-| **ChatDev** | 2023 | Role-based software development with "communicative dehallucination" |
-| **MetaGPT** | 2023 | SOP-driven pipeline with structured document handoffs |
-| **AutoGen** | 2023 | Async multi-agent with SocietyOfMindAgent consensus |
-| **CrewAI** | 2023 | Role/task/crew abstractions for workflow orchestration |
-
-We do not claim to have invented multi-agent collaborative development.
-
----
-
-## What This Implementation Adds
-
-Our contribution is **practical refinements for production/unsupervised use**:
-
-### 1. Autonomous Self-Organization
-- Agents communicate via @mentions in shared conversation file
-- No turn-taking orchestration - agents decide when to speak
-- Natural collaboration with "When to Respond" / "When to Stay Quiet" rules
-
-### 2. Design Discussion Phase
-- @PM leads design discussion before implementation
-- @Security raises all concerns at design time (not during implementation)
-- Team agrees on phase structure, then executes
-
-### 3. TDD + PoC Phased Development
-- **Phase 1**: Minimal working version (happy path + tests FIRST)
-- **Phase 2**: Error handling + tests
-- **Phase 3**: Edge cases + tests
-- **Phase 4**: Polish, security hardening, optimization
-
-### 4. Explicit Conflict Resolution
-- **Tie-breaker rules**: Security wins security disputes; PM wins other conflicts
-- **2-strike rule**: After raising same concern twice, agent MUST propose solution
-- **Self-unblocking**: Agents resolve blockers themselves (e.g., Security writes the test if Dev won't) rather than staying BLOCKED indefinitely
-- **DecisionsTracker.md**: Deviation log — records where implementation differs from the plan, so a human can review and decide whether to keep or discard the work
-- **Pre-action conversation check**: Every agent checks the last 50 lines of conversation before their key action (committing, reviewing, declaring complete)
-
-### 5. Human Escalation
-- Stall detection triggers human escalation
-- Agents pause gracefully, await guidance
-- Human input relayed as `@HUMAN` message
-
-### 6. Trust but Verify — Post-Implementation Verification Loop
-- After all agents declare `SATISFIED`, a **verification agent** compares plan vs actual implementation
-- The verification agent reads actual code — it does not blindly trust status claims
-- **DecisionsTracker.md entries are treated as intentional** — not flagged as gaps
-- Verification is **pragmatic, not strict** — alternative implementations that achieve the same goal are fine
-- If gaps are found: `conversation.txt` is archived (timestamped), `satisfaction.txt` is reset, and the team is **relaunched** with a gap report
-- Up to `--max-retries` rounds (default 5); set to `0` to disable verification (old behavior)
-- Each round gets a fresh conversation to keep agent context windows clean
 
 ---
 
 ## Personas
 
-| Role | Focus | Tie-Breaker Authority |
-|------|-------|----------------------|
-| **Dev** | Implementation, TDD, code quality | - |
-| **Security** | Threat modeling, secure defaults | TIER 1 (wins security disputes) |
-| **PM** | Acceptance criteria, user delight | TIER 2 (wins UX/scope disputes) |
-| **QA** | Testing, user journey, edge cases | - |
-| **SRE** | Observability, reliability, failure modes | - |
+Mandali reads the task and assembles a team to match.
+
+**Code tasks** get the hand-tuned code team — Dev, Security, PM, QA, SRE — specialists whose behavioral contracts have been refined through iteration. Each has tie-breaker authority in their domain (Security wins security disputes, PM wins scope disputes).
+
+**Non-code and mixed tasks** — research, analysis, writing, or anything spanning code and other domains — get a team of generated specialists. Each domain gets adversarial coverage: a Doer to produce the work, a Critic to challenge it, and a Scope-keeper when the task crosses multiple domains.
+
+Generated personas carry the same behavioral depth as the static team: engagement rules, conflict resolution, self-unblocking protocols. The collaboration model is the same regardless of team composition.
+
+```bash
+# Force the static code team regardless of task type
+mandali --prompt "..." --generate-plan --out-path ./output --static-personas
+
+# Override domain detection
+mandali --prompt "..." --generate-plan --out-path ./output --domains analytics,writing
+```
 
 ---
 
-## Files
+## Quality & Oversight
+
+**Verification before completion** — When all agents declare their work done, a separate verification agent independently reviews the output against the plan. If gaps are found, agents are relaunched with a gap report. This repeats for up to `--max-retries` rounds (default 5), ensuring the final output actually matches what was asked for.
+
+**Human interjection** — You can type a message at any time during execution, and it's relayed to all agents as guidance. This is entirely optional — agents work autonomously and only escalate to you if they stall or explicitly need a decision. You're in control without being required to be present.
+
+**Deviation tracking** — Agents record every departure from the plan in `DecisionsTracker.md`, so you can diff "what I asked for" vs "what I got" after the run.
+
+---
+
+## Workspace Layout
 
 ```
-mandali/                           # Mandali source
-├── mandali.py                     # Autonomous orchestrator
-├── config.yaml                    # Personas, model, settings
-├── PRIOR_ART.md                   # Framework comparison
-├── DecisionsTracker.md            # Deviation log template
-├── personas/
-│   ├── dev.persona.md
-│   ├── security.persona.md
-│   ├── pm.persona.md
-│   ├── qa.persona.md
-│   └── sre.persona.md
-
-# When --out-path is inside a git repo (worktree isolation):
-myproject/                         # Your repo (UNTOUCHED)
-myproject-mandali-<timestamp>/     # Worktree (agents work here)
-├── {feature files created by agents}
-├── phases/                        # Phased plan files (copied or generated)
-│   ├── _CONTEXT.md
-│   ├── _INDEX.md
-│   └── phase-*.md
-└── mandali-artifacts/             # Orchestration files
-    ├── conversation.txt
-    ├── conversation-round-*.txt
-    ├── satisfaction.txt
-    ├── DecisionsTracker.md
-    ├── plan.md
-    └── metrics.json
-
-# When --out-path is NOT inside a git repo (no isolation):
-<out-path>/                        # Agents work directly here
-├── {same layout as above}
+<out-path>/
+├── {deliverable files}            # Agent output goes here
+├── phases/                        # Plan files
+│   ├── _CONTEXT.md                # Global context (read first by all agents)
+│   ├── _INDEX.md                  # Phase tracking with status
+│   └── phase-*.md                 # Per-phase tasks and quality gates
+└── mandali-artifacts/             # Internal orchestration (auto-created)
+    ├── conversation.txt           # Agent communication log
+    ├── DecisionsTracker.md        # Deviation log
+    ├── dynamic-personas/          # Generated persona files (non-code tasks)
+    └── ...
 ```
+
+When `--out-path` is inside a git repo, Mandali creates a **worktree** so agents never touch your working directory.
+
+---
+
+## MCP Servers & Extensions
+
+Mandali loads MCP server configuration from `~/.copilot/mcp-config.json` (or `.copilot/mcp-config.json` in the project). All configured servers — databases, browsers, APIs, specialized tools — are available to every agent. User-installed Copilot skills and extensions are passed through automatically.
 
 ---
 
@@ -543,7 +157,7 @@ This system builds on ideas from several multi-agent frameworks:
 | **CrewAI** | Role-based specialization |
 | **MetaGPT/ChatDev** | Software team role modeling |
 
-See **[PRIOR_ART.md](./PRIOR_ART.md)** for detailed comparison, limitations of existing frameworks, and how our approach addresses them.
+See **[PRIOR_ART.md](./PRIOR_ART.md)** for detailed comparison and how Mandali's approach addresses known limitations.
 
 ---
 
@@ -551,9 +165,9 @@ See **[PRIOR_ART.md](./PRIOR_ART.md)** for detailed comparison, limitations of e
 
 ### 🔮 Emulate Me Mode
 
-What if the agents didn't just play generic roles — but played *you*?
+What if the agents didn't just play domain roles — but played *you*?
 
-Mandali can already orchestrate five specialists. The next step: teach them how *you* think. Your code review instincts. Your bias toward simplicity or thoroughness. The concerns you always raise. The ones you never do.
+Mandali already assembles teams that adapt to the task. The next step: teach them how *you* think. Your code review instincts. Your bias toward simplicity or thoroughness. The concerns you always raise. The ones you never do.
 
 One command. Autonomous agents. Your voice!
 
@@ -563,7 +177,7 @@ One command. Autonomous agents. Your voice!
 
 ## License
 
-MIT (or as specified by repository)
+MIT
 
 ---
 
