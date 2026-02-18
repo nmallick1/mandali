@@ -421,6 +421,7 @@ class PersonaAgent:
     prompt_file: str = None  # Path to persona file (dynamic personas)
     dynamic: bool = False  # True for dynamically generated personas
     domain: str = None  # Domain (for dynamic personas)
+    session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Serializes session access
 
 
 @dataclass
@@ -2033,32 +2034,33 @@ End EVERY message with one of:
     
     async def send_and_wait(prompt: str) -> str:
         """Send prompt and wait for response, handling events properly."""
-        response_parts = []
-        done = asyncio.Event()
-        
-        def on_event(event):
-            if event.type.value == "assistant.message":
-                response_parts.append(event.data.content)
-            elif event.type.value == "assistant.message_delta":
-                if hasattr(event.data, 'delta_content') and event.data.delta_content:
-                    response_parts.append(event.data.delta_content)
-            elif event.type.value == "session.idle":
-                done.set()
-            elif event.type.value == "session.error":
-                log(f"{agent.mention} error: {event.data}", "ERR")
-                done.set()
-        
-        # Register handler, send, wait, then unregister
-        unsubscribe = session.on(on_event)
-        try:
-            await session.send({"prompt": prompt})
-            await asyncio.wait_for(done.wait(), timeout=300)  # 5 min timeout
-        except asyncio.TimeoutError:
-            log(f"{agent.mention} response timeout", "WARN")
-        finally:
-            unsubscribe()
-        
-        return ''.join(response_parts)
+        async with agent.session_lock:
+            response_parts = []
+            done = asyncio.Event()
+            
+            def on_event(event):
+                if event.type.value == "assistant.message":
+                    response_parts.append(event.data.content)
+                elif event.type.value == "assistant.message_delta":
+                    if hasattr(event.data, 'delta_content') and event.data.delta_content:
+                        response_parts.append(event.data.delta_content)
+                elif event.type.value == "session.idle":
+                    done.set()
+                elif event.type.value == "session.error":
+                    log(f"{agent.mention} error: {event.data}", "ERR")
+                    done.set()
+            
+            # Register handler, send, wait, then unregister
+            unsubscribe = session.on(on_event)
+            try:
+                await session.send({"prompt": prompt})
+                await asyncio.wait_for(done.wait(), timeout=300)  # 5 min timeout
+            except asyncio.TimeoutError:
+                log(f"{agent.mention} response timeout", "WARN")
+            finally:
+                unsubscribe()
+            
+            return ''.join(response_parts)
     
     # Send initial prompt
     try:
@@ -3528,7 +3530,7 @@ class AutonomousOrchestrator:
         # Satisfaction reconciliation state
         last_reconciliation_time = datetime.now()
         reconciliation_cooldown = 300  # 5 minutes between reconciliation attempts
-        activity_start_time = datetime.now()  # Track prolonged activity window
+        monitor_start_time = datetime.now()  # When monitoring began
         
         while True:
             # Non-blocking sleep with input check
@@ -3568,7 +3570,11 @@ class AutonomousOrchestrator:
                 )
                 status = read_all_satisfaction(workspace)
                 no_blocked = not any('BLOCKED' in s for s in status.values())
-                prolonged_activity = (now - activity_start_time).total_seconds() > 600
+                # Prolonged activity: monitor running >10min AND recent activity (not stalled)
+                last_activity = get_last_activity_time(workspace)
+                monitor_running = (now - monitor_start_time).total_seconds() > 600
+                recently_active = (now - last_activity).total_seconds() < stall_timeout
+                prolonged_activity = monitor_running and recently_active
                 
                 if all_phases_done or (prolonged_activity and no_blocked):
                     log("Running satisfaction reconciliation...", "INFO")
@@ -3912,32 +3918,33 @@ Before starting the next phase:
     
     async def _send_reconciliation_prompt(self, agent: PersonaAgent, prompt: str) -> str:
         """Send a prompt to an agent's existing session and return the response."""
-        response_parts = []
-        done = asyncio.Event()
-        
-        def on_event(event):
-            if event.type.value == "assistant.message":
-                response_parts.append(event.data.content)
-            elif event.type.value == "assistant.message_delta":
-                if hasattr(event.data, 'delta_content') and event.data.delta_content:
-                    response_parts.append(event.data.delta_content)
-            elif event.type.value == "session.idle":
-                done.set()
-            elif event.type.value == "session.error":
-                done.set()
-        
-        unsubscribe = agent.session.on(on_event)
-        try:
-            await agent.session.send({"prompt": prompt})
-            await asyncio.wait_for(done.wait(), timeout=60)
-        except asyncio.TimeoutError:
-            _debug_log("reconciliation_timeout", {"agent": agent.id})
-        except Exception as e:
-            _debug_log("reconciliation_error", {"agent": agent.id, "error": str(e)})
-        finally:
-            unsubscribe()
-        
-        return ''.join(response_parts)
+        async with agent.session_lock:
+            response_parts = []
+            done = asyncio.Event()
+            
+            def on_event(event):
+                if event.type.value == "assistant.message":
+                    response_parts.append(event.data.content)
+                elif event.type.value == "assistant.message_delta":
+                    if hasattr(event.data, 'delta_content') and event.data.delta_content:
+                        response_parts.append(event.data.delta_content)
+                elif event.type.value == "session.idle":
+                    done.set()
+                elif event.type.value == "session.error":
+                    done.set()
+            
+            unsubscribe = agent.session.on(on_event)
+            try:
+                await agent.session.send({"prompt": prompt})
+                await asyncio.wait_for(done.wait(), timeout=60)
+            except asyncio.TimeoutError:
+                _debug_log("reconciliation_timeout", {"agent": agent.id})
+            except Exception as e:
+                _debug_log("reconciliation_error", {"agent": agent.id, "error": str(e)})
+            finally:
+                unsubscribe()
+            
+            return ''.join(response_parts)
     
     async def announce_victory(self, workspace: Workspace, is_final: bool = True):
         """Inject victory message. If not final, announce verification pending."""
