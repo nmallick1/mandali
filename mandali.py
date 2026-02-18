@@ -3525,6 +3525,11 @@ class AutonomousOrchestrator:
         # Track last known phase state for ticker updates
         last_phase_ticker = ""
         
+        # Satisfaction reconciliation state
+        last_reconciliation_time = datetime.now()
+        reconciliation_cooldown = 300  # 5 minutes between reconciliation attempts
+        activity_start_time = datetime.now()  # Track prolonged activity window
+        
         while True:
             # Non-blocking sleep with input check
             for _ in range(POLL_INTERVAL_SECONDS * 10):
@@ -3552,6 +3557,31 @@ class AutonomousOrchestrator:
             # Check agent health — restart any that crashed
             await self._check_and_recover_agents()
             
+            # Satisfaction reconciliation: proactively poll agents when evidence
+            # suggests work is done but not all agents have declared SATISFIED
+            now = datetime.now()
+            since_last_reconciliation = (now - last_reconciliation_time).total_seconds()
+            if since_last_reconciliation >= reconciliation_cooldown:
+                phases = self._parse_phase_list(workspace)
+                all_phases_done = phases and all(
+                    '✅' in p[2] or 'complete' in p[2].lower() for p in phases
+                )
+                status = read_all_satisfaction(workspace)
+                no_blocked = not any('BLOCKED' in s for s in status.values())
+                prolonged_activity = (now - activity_start_time).total_seconds() > 600
+                
+                if all_phases_done or (prolonged_activity and no_blocked):
+                    log("Running satisfaction reconciliation...", "INFO")
+                    await self._reconcile_satisfaction(workspace)
+                    last_reconciliation_time = now
+                    
+                    # Re-check victory after reconciliation
+                    if check_all_satisfied(workspace, expected_agents):
+                        log("🎉 All agents SATISFIED after reconciliation - Victory!", "OK")
+                        await self.announce_victory(workspace, is_final=is_final_round)
+                        self.metrics.victory = True
+                        return True
+            
             # Check for inactivity
             last_activity = get_last_activity_time(workspace)
             idle_seconds = (datetime.now() - last_activity).total_seconds()
@@ -3575,7 +3605,23 @@ class AutonomousOrchestrator:
                     self.metrics.nudges += 1
                     log(f"Nudging agents (attempt {nudge_count}/{max_nudges})", "INFO")
                     
-                    append_to_conversation(workspace, "ORCHESTRATOR", f"""
+                    # Phase-aware nudge: check _INDEX.md to craft a targeted message
+                    phases = self._parse_phase_list(workspace)
+                    all_phases_done = phases and all(
+                        '✅' in p[2] or 'complete' in p[2].lower() for p in phases
+                    )
+                    
+                    if all_phases_done:
+                        append_to_conversation(workspace, "ORCHESTRATOR", f"""
+@Team - All phases appear complete per _INDEX.md but not all agents have declared SATISFIED.
+
+If your concerns are addressed, declare SATISFACTION_STATUS: SATISFIED on its own line.
+If something remains, state what's needed with SATISFACTION_STATUS: BLOCKED - [reason] or WORKING.
+
+Nudge {nudge_count}/{max_nudges} before human escalation.
+""")
+                    else:
+                        append_to_conversation(workspace, "ORCHESTRATOR", f"""
 @Team - No activity detected for {int(idle_seconds // 60)} minutes.
 
 Please continue working on the plan. If you're blocked, state what you need. End your next message with your status on its own line, exactly like:
@@ -3795,6 +3841,103 @@ Before starting the next phase:
             return ""
         
         return " → ".join(parts) + f" ({done_count}/{total} phases complete)"
+    
+    async def _reconcile_satisfaction(self, workspace: Workspace):
+        """Proactively poll non-SATISFIED agents for their status via direct session prompt.
+        
+        Bypasses conversation.txt entirely — results go to satisfaction.txt
+        and debug JSONL only. Retries once per agent on unparseable response.
+        """
+        status = read_all_satisfaction(workspace)
+        expected = list(self.agents.keys())
+        unsatisfied = [aid for aid in expected
+                       if aid not in status or "SATISFIED" not in status.get(aid, "")]
+        
+        if not unsatisfied:
+            return  # All already satisfied
+        
+        _debug_log("reconciliation_start", {
+            "unsatisfied_agents": unsatisfied,
+            "current_status": status,
+        })
+        
+        for agent_id in unsatisfied:
+            agent = self.agents.get(agent_id)
+            if not agent or not agent.session:
+                _debug_log("reconciliation_skip", {
+                    "agent": agent_id, "reason": "no session"
+                })
+                continue
+            
+            prompt = (
+                "All phases are complete per _INDEX.md. Review the current state of the implementation.\n"
+                "Reply with ONLY one line: SATISFACTION_STATUS: SATISFIED or WORKING or BLOCKED - [reason]"
+            )
+            
+            parsed_status = None
+            for attempt in range(2):
+                response = await self._send_reconciliation_prompt(agent, prompt)
+                _debug_log("reconciliation_response", {
+                    "agent": agent_id, "attempt": attempt + 1,
+                    "prompt": prompt, "response": response[:500] if response else None,
+                })
+                
+                if response:
+                    match = re.search(
+                        r'SATISFACTION_STATUS\s*:\s*(SATISFIED|BLOCKED|PAUSED|WORKING)(?:\s*-\s*(.*))?',
+                        response, re.IGNORECASE
+                    )
+                    if match:
+                        parsed_status = match.group(1).upper()
+                        reason = (match.group(2) or "").split("\n")[0].strip()
+                        break
+                
+                # Retry with a shorter, more direct prompt
+                prompt = "Reply with exactly one line: SATISFACTION_STATUS: SATISFIED or WORKING or BLOCKED"
+            
+            # Update satisfaction.txt with parsed or default status
+            if parsed_status == "SATISFIED":
+                update_satisfaction(workspace, agent_id, "SATISFIED")
+            elif parsed_status == "BLOCKED":
+                update_satisfaction(workspace, agent_id, f"BLOCKED - {reason}" if reason else "BLOCKED")
+            elif parsed_status == "PAUSED":
+                update_satisfaction(workspace, agent_id, "PAUSED - Awaiting human guidance")
+            else:
+                update_satisfaction(workspace, agent_id, parsed_status or "WORKING")
+            
+            _debug_log("reconciliation_result", {
+                "agent": agent_id,
+                "parsed_status": parsed_status or "WORKING (default)",
+            })
+    
+    async def _send_reconciliation_prompt(self, agent: PersonaAgent, prompt: str) -> str:
+        """Send a prompt to an agent's existing session and return the response."""
+        response_parts = []
+        done = asyncio.Event()
+        
+        def on_event(event):
+            if event.type.value == "assistant.message":
+                response_parts.append(event.data.content)
+            elif event.type.value == "assistant.message_delta":
+                if hasattr(event.data, 'delta_content') and event.data.delta_content:
+                    response_parts.append(event.data.delta_content)
+            elif event.type.value == "session.idle":
+                done.set()
+            elif event.type.value == "session.error":
+                done.set()
+        
+        unsubscribe = agent.session.on(on_event)
+        try:
+            await agent.session.send({"prompt": prompt})
+            await asyncio.wait_for(done.wait(), timeout=60)
+        except asyncio.TimeoutError:
+            _debug_log("reconciliation_timeout", {"agent": agent.id})
+        except Exception as e:
+            _debug_log("reconciliation_error", {"agent": agent.id, "error": str(e)})
+        finally:
+            unsubscribe()
+        
+        return ''.join(response_parts)
     
     async def announce_victory(self, workspace: Workspace, is_final: bool = True):
         """Inject victory message. If not final, announce verification pending."""
