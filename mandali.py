@@ -2132,17 +2132,21 @@ Remember:
 
 def extract_and_update_status(workspace: Workspace, agent_id: str, response: str):
     """Extract satisfaction status from response and update file."""
-    if "SATISFACTION_STATUS: SATISFIED" in response:
-        update_satisfaction(workspace, agent_id, "SATISFIED")
-    elif "SATISFACTION_STATUS: BLOCKED" in response:
-        try:
-            reason = response.split("SATISFACTION_STATUS: BLOCKED -")[1].split("\n")[0].strip()
-            update_satisfaction(workspace, agent_id, f"BLOCKED - {reason}")
-        except (IndexError, ValueError):
-            update_satisfaction(workspace, agent_id, "BLOCKED")
-    elif "SATISFACTION_STATUS: PAUSED" in response:
-        update_satisfaction(workspace, agent_id, "PAUSED - Awaiting human guidance")
-    elif "SATISFACTION_STATUS: WORKING" in response:
+    # Loose regex: tolerates missing spaces, mixed case, extra whitespace
+    match = re.search(r'SATISFACTION_STATUS\s*:\s*(SATISFIED|BLOCKED|PAUSED|WORKING)(?:\s*-\s*(.*))?', response, re.IGNORECASE)
+    if match:
+        status = match.group(1).upper()
+        reason = (match.group(2) or "").split("\n")[0].strip()
+        if status == "SATISFIED":
+            update_satisfaction(workspace, agent_id, "SATISFIED")
+        elif status == "BLOCKED":
+            update_satisfaction(workspace, agent_id, f"BLOCKED - {reason}" if reason else "BLOCKED")
+        elif status == "PAUSED":
+            update_satisfaction(workspace, agent_id, "PAUSED - Awaiting human guidance")
+        else:
+            update_satisfaction(workspace, agent_id, "WORKING")
+    else:
+        # Default fallback: agent responded but didn't emit a status tag
         update_satisfaction(workspace, agent_id, "WORKING")
 
 
@@ -3574,7 +3578,9 @@ class AutonomousOrchestrator:
                     append_to_conversation(workspace, "ORCHESTRATOR", f"""
 @Team - No activity detected for {int(idle_seconds // 60)} minutes.
 
-Please continue working on the plan. If you're blocked, state what you need.
+Please continue working on the plan. If you're blocked, state what you need. End your next message with your status on its own line, exactly like:
+SATISFACTION_STATUS: WORKING
+or SATISFIED, BLOCKED - [reason], PAUSED.
 
 Nudge {nudge_count}/{max_nudges} before human escalation.
 """)
