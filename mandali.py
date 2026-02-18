@@ -3532,6 +3532,10 @@ class AutonomousOrchestrator:
         reconciliation_cooldown = 300  # 5 minutes between reconciliation attempts
         monitor_start_time = datetime.now()  # When monitoring began
         
+        # Human-blocked detection state (independent of stall timeout)
+        first_human_block_time = None  # When we first noticed agents blocked on human
+        human_block_grace = 300  # 5 minutes grace before escalating
+        
         while True:
             # Non-blocking sleep with input check
             for _ in range(POLL_INTERVAL_SECONDS * 10):
@@ -3588,24 +3592,31 @@ class AutonomousOrchestrator:
                         self.metrics.victory = True
                         return True
             
+            # Independent human-blocked detection (not gated behind stall timeout)
+            status = read_all_satisfaction(workspace)
+            blocked_on_human = [aid for aid, s in status.items()
+                                if "@HUMAN" in s or "human" in s.lower()]
+            
+            if blocked_on_human:
+                if first_human_block_time is None:
+                    first_human_block_time = datetime.now()
+                    log(f"Agent(s) requesting human input: {', '.join(blocked_on_human)}", "INFO")
+                elif (datetime.now() - first_human_block_time).total_seconds() > human_block_grace:
+                    log(f"Agents blocked on human for >5 min, escalating", "WARN")
+                    should_continue = await self.handle_human_escalation(workspace)
+                    if not should_continue:
+                        return False
+                    first_human_block_time = None
+                    nudge_count = 0
+            else:
+                first_human_block_time = None  # Reset if no longer blocked on human
+            
             # Check for inactivity
             last_activity = get_last_activity_time(workspace)
             idle_seconds = (datetime.now() - last_activity).total_seconds()
             
             if idle_seconds > stall_timeout:
-                # Check if any agent is explicitly waiting for human
-                status = read_all_satisfaction(workspace)
-                waiting_for_human = any("@HUMAN" in s or "human" in s.lower() 
-                                        for s in status.values())
-                
-                if waiting_for_human:
-                    # Agents explicitly waiting for human - escalate immediately
-                    log(f"Agents waiting for human input", "WARN")
-                    should_continue = await self.handle_human_escalation(workspace)
-                    if not should_continue:
-                        return False
-                    nudge_count = 0
-                elif nudge_count < max_nudges:
+                if nudge_count < max_nudges:
                     # Nudge agents to continue
                     nudge_count += 1
                     self.metrics.nudges += 1
@@ -3977,18 +3988,50 @@ Please stand by.
         await asyncio.sleep(5)
     
     async def handle_human_escalation(self, workspace: Workspace) -> bool:
-        """Handle stall by escalating to human."""
+        """Handle stall by escalating to human with LLM-summarized context."""
         self.metrics.human_escalations += 1
         
         status = read_all_satisfaction(workspace)
         status_lines = "\n".join([f"- @{k.capitalize()}: {v}" for k, v in status.items()])
         
+        # Identify which agents are blocked/paused
+        blocked_agents = [f"@{k.capitalize()}" for k, v in status.items()
+                          if any(kw in v.upper() for kw in ("BLOCKED", "PAUSED", "HUMAN"))]
+        
+        # Extract last ~20 messages from conversation for LLM context
+        summary_text = ""
+        try:
+            conv = read_conversation(workspace)
+            # Split on message boundaries: [HH:MM:SS] @SENDER:
+            messages = re.split(r'(?=\[\d{2}:\d{2}:\d{2}\]\s+@)', conv)
+            messages = [m.strip() for m in messages if m.strip()]
+            recent = messages[-20:] if len(messages) > 20 else messages
+            recent_text = "\n\n".join(recent)
+            
+            blocked_list = ", ".join(blocked_agents) if blocked_agents else "unknown agents"
+            summary = await _send_and_get_response(
+                self.client, self.model,
+                system_prompt=(
+                    "You are a concierge for a human overseeing an AI agent team. "
+                    f"The following agents need human input: {blocked_list}. "
+                    "Read the recent conversation and identify what specific question(s) or "
+                    "decision(s) the human needs to answer. Be concise — list each question "
+                    "clearly with which agent is asking. Do not include background context "
+                    "the human doesn't need. If no clear question is found, say so."
+                ),
+                message=recent_text,
+                timeout_seconds=30,
+            )
+            if summary and summary.strip():
+                summary_text = summary.strip()
+        except Exception as e:
+            log(f"Failed to summarize escalation context: {e}", "WARN")
+        
         # Inject pause message
         append_to_conversation(workspace, "ORCHESTRATOR", f"""
 @AllAgents - Escalating to @HUMAN for guidance.
 
-No activity detected for several minutes. Please pause current work
-and ensure things are in a consistent state.
+Please pause current work and ensure things are in a consistent state.
 
 Wait for human input before continuing.
 
@@ -3998,16 +4041,28 @@ Current status:
         
         log("Waiting for human input...", "HUMAN")
         
-        # Show status to human
-        console.print(Panel(
-            f"Agents have stalled. Current status:\n{escape(status_lines)}\n\n"
-            f"Conversation: {workspace.conversation_file}\n\n"
-            "Options:\n"
-            "  [bold]1[/bold]. Provide guidance\n"
-            "  [bold]2[/bold]. View recent conversation\n"
-            "  [bold]3[/bold]. Abort",
-            title="⚠️  HUMAN ESCALATION", border_style="yellow"
-        ))
+        # Build panel content with LLM summary if available
+        if summary_text:
+            panel_content = (
+                f"[bold]What agents need from you:[/bold]\n{escape(summary_text)}\n\n"
+                f"[dim]Agent status:\n{escape(status_lines)}[/dim]\n\n"
+                f"Conversation: {workspace.conversation_file}\n\n"
+                "Options:\n"
+                "  [bold]1[/bold]. Provide guidance\n"
+                "  [bold]2[/bold]. View recent conversation\n"
+                "  [bold]3[/bold]. Abort"
+            )
+        else:
+            panel_content = (
+                f"Agents need human input. Current status:\n{escape(status_lines)}\n\n"
+                f"Conversation: {workspace.conversation_file}\n\n"
+                "Options:\n"
+                "  [bold]1[/bold]. Provide guidance\n"
+                "  [bold]2[/bold]. View recent conversation\n"
+                "  [bold]3[/bold]. Abort"
+            )
+        
+        console.print(Panel(panel_content, title="⚠️  HUMAN ESCALATION", border_style="yellow"))
         
         while True:
             choice = Prompt.ask("Choose", choices=["1", "2", "3"])
