@@ -3583,7 +3583,7 @@ class AutonomousOrchestrator:
                 if all_phases_done or (prolonged_activity and no_blocked):
                     log("Running satisfaction reconciliation...", "INFO")
                     await self._reconcile_satisfaction(workspace)
-                    last_reconciliation_time = now
+                    last_reconciliation_time = datetime.now()
                     
                     # Re-check victory after reconciliation
                     if check_all_satisfied(workspace, expected_agents):
