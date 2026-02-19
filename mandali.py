@@ -1938,8 +1938,16 @@ Focus on what the user needs to know — not how it was built.
     
     content = ''.join(response_parts)
     
+    # Check if the LLM already created HANDOFF.md via tools
+    handoff_file = workspace.path / "HANDOFF.md"
+    if handoff_file.exists():
+        file_content = handoff_file.read_text(encoding='utf-8').strip()
+        if file_content:
+            log(f"Handoff instructions saved to {handoff_file}", "OK")
+            return file_content
+    
+    # Fallback: LLM responded with text instead of using tools
     if content.strip():
-        handoff_file = workspace.path / "HANDOFF.md"
         handoff_file.write_text(content, encoding='utf-8')
         log(f"Handoff instructions saved to {handoff_file}", "OK")
         return content
@@ -4865,8 +4873,14 @@ Begin by reviewing the gaps and the codebase, then work to close them.
                     workspace, plan_content, prompt_context or ""
                 )
                 if handoff_content:
+                    # Show summary (first 500 chars) and point to file for full details
+                    preview = handoff_content[:500]
+                    if len(handoff_content) > 500:
+                        preview += "\n..."
+                    handoff_path = workspace.path / "HANDOFF.md"
                     console.print(Panel(
-                        escape(handoff_content[:3000]),
+                        f"{escape(preview)}\n\n"
+                        f"[bold]Full instructions:[/bold] {handoff_path}",
                         title="📋 HANDOFF — How to Use Your Deliverable",
                         border_style="green"
                     ))
