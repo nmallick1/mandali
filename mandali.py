@@ -3214,15 +3214,11 @@ class AutonomousOrchestrator:
     
     async def start(self):
         log("Starting Copilot client...", "INFO")
-        # Let SDK use its bundled CLI binary (most reliable).
-        # Fall back to explicit path only if COPILOT_CLI_PATH is set.
-        env_path = os.environ.get("COPILOT_CLI_PATH")
-        if env_path:
-            self._cli_path = env_path
-            log(f"Using CLI at: {self._cli_path}", "INFO")
-        else:
-            self._cli_path = None
-            log("Using SDK bundled CLI", "INFO")
+        # Always resolve the CLI path explicitly so the SDK gets a full path.
+        # On Windows, subprocess.Popen can't find bare "copilot" (.cmd wrapper);
+        # get_copilot_cli_path() resolves to the correct .cmd/.exe path.
+        self._cli_path = get_copilot_cli_path()
+        log(f"Using CLI at: {self._cli_path}", "INFO")
         await self._connect_with_retry()
         log("Copilot client ready", "OK")
     
@@ -3230,10 +3226,7 @@ class AutonomousOrchestrator:
         """Connect to Copilot CLI with retry logic for transient failures."""
         last_error = None
         for attempt in range(1, max_retries + 1):
-            if self._cli_path:
-                self.client = CopilotClient({"cli_path": self._cli_path})
-            else:
-                self.client = CopilotClient()
+            self.client = CopilotClient({"cli_path": self._cli_path})
             try:
                 await self.client.start()
                 return
