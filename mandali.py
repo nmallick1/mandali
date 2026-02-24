@@ -134,6 +134,7 @@ PERSONAS_DIR = SCRIPT_DIR / "personas"
 
 STALL_TIMEOUT_SECONDS = 300  # 5 minutes without activity = stall
 POLL_INTERVAL_SECONDS = 10  # Check status every 10 seconds
+QUIET_MODE = False  # Set by --quiet flag; suppresses non-essential output
 
 # Lock for serializing file writes to prevent race conditions
 import threading
@@ -422,6 +423,7 @@ class PersonaAgent:
     dynamic: bool = False  # True for dynamically generated personas
     domain: str = None  # Domain (for dynamic personas)
     session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Serializes session access
+    model: str = None  # Per-persona model override (falls back to orchestrator model)
 
 
 @dataclass
@@ -529,7 +531,9 @@ class TaskClassification:
 # ============================================================================
 
 def log(msg: str, level: str = "INFO"):
-    """Log with timestamp and styled output."""
+    """Log with timestamp and styled output. Suppressed in --quiet mode except HUMAN/ERR/WARN."""
+    if QUIET_MODE and level in ("INFO", "OK", "AGENT"):
+        return
     timestamp = datetime.now().strftime("%H:%M:%S")
     styles = {
         "INFO": ("ℹ️", "bright_blue"),
@@ -1459,6 +1463,7 @@ async def assemble_team(client, model: str, classification: 'TaskClassification'
                 'domain': 'software-development',
                 'role': 'Doer',
                 'mention': f"@{p['name']}",
+                'model': p.get('model'),
             })
         log(f"Pure software-development task: using {len(static_team)} static personas", "OK")
         return static_team
@@ -1480,6 +1485,7 @@ async def assemble_team(client, model: str, classification: 'TaskClassification'
                 'domain': 'software-development',
                 'role': 'Doer',
                 'mention': f"@{p['name']}",
+                'model': p.get('model'),
             })
             existing_roster.append(p['name'])
     
@@ -1498,7 +1504,7 @@ async def assemble_team(client, model: str, classification: 'TaskClassification'
                 'id': p['id'], 'name': p['name'],
                 'promptFile': str(SCRIPT_DIR / p['promptFile']),
                 'dynamic': False, 'domain': 'software-development', 'role': 'Doer',
-                'mention': f"@{p['name']}",
+                'mention': f"@{p['name']}", 'model': p.get('model'),
             } for p in config.get('personas', [])]
     
     # Generate personas in parallel: Doer + Critic + Scope-keeper candidate per domain
@@ -1557,7 +1563,7 @@ async def assemble_team(client, model: str, classification: 'TaskClassification'
             'id': p['id'], 'name': p['name'],
             'promptFile': str(SCRIPT_DIR / p['promptFile']),
             'dynamic': False, 'domain': 'software-development', 'role': 'Doer',
-            'mention': f"@{p['name']}",
+            'mention': f"@{p['name']}", 'model': p.get('model'),
         } for p in config.get('personas', [])]
     
     # Dedup
@@ -3313,6 +3319,7 @@ class AutonomousOrchestrator:
                     'dynamic': False,
                     'domain': 'software-development',
                     'role': 'Doer',
+                    'model': p.get('model'),
                 })
         
         team_size = len(personas)
@@ -3321,18 +3328,22 @@ class AutonomousOrchestrator:
         self._team_roster = personas
         self._team_size = team_size
         
-        # Query actual available models from SDK and show active model
+        # Query actual available models from SDK and show active models
         try:
             models = await self.client.list_models()
-            active = next((m for m in models if m.id == self.model), None)
-            if active:
-                multiplier = f"{active.billing.multiplier}x" if active.billing else "?"
-                log(f"Model: {active.name} ({active.id}) [{multiplier}]", "OK")
-            else:
-                log(f"Model: {self.model} (not found in available models)", "WARN")
-                available = ", ".join(m.id for m in models if m.policy and m.policy.state == "enabled")
-                if available:
-                    log(f"Available: {available}", "INFO")
+            # Collect unique models across personas
+            persona_models = set(p.get('model') for p in personas if p.get('model'))
+            all_models = persona_models | {self.model}
+            for mid in sorted(all_models):
+                active = next((m for m in models if m.id == mid), None)
+                if active:
+                    multiplier = f"{active.billing.multiplier}x" if active.billing else "?"
+                    label = "default" if mid == self.model else "persona"
+                    log(f"Model ({label}): {active.name} ({active.id}) [{multiplier}]", "OK")
+                else:
+                    log(f"Model: {mid} (not found in available models)", "WARN")
+            if not persona_models:
+                log(f"All agents using default model: {self.model}", "INFO")
         except Exception as e:
             log(f"Model: {self.model} (could not query models: {e})", "WARN")
         
@@ -3348,20 +3359,23 @@ class AutonomousOrchestrator:
                 prompt_file=persona.get('promptFile') if persona.get('dynamic') else None,
                 dynamic=persona.get('dynamic', False),
                 domain=persona.get('domain'),
+                model=persona.get('model'),
             )
             
-            # Launch as background task
+            # Launch as background task — use per-persona model if set, else orchestrator default
+            agent_model = agent.model or self.model
             agent.task = asyncio.create_task(
                 run_autonomous_agent(
                     self.client, agent, workspace, plan_content,
-                    self.model, is_first=(i == 0),
+                    agent_model, is_first=(i == 0),
                     team_roster=personas, team_size=team_size
                 )
             )
             
             self.agents[persona['id']] = agent
             dynamic_tag = " [dynamic]" if agent.dynamic else ""
-            log(f"Launched {agent.mention}{dynamic_tag}", "AGENT")
+            model_tag = f" [{agent_model}]" if agent.model else ""
+            log(f"Launched {agent.mention}{dynamic_tag}{model_tag}", "AGENT")
             
             # Stagger launches slightly
             await asyncio.sleep(2)
@@ -3488,10 +3502,11 @@ class AutonomousOrchestrator:
                 # Relaunch the agent
                 log(f"Relaunching {agent.mention}...", "INFO")
                 is_first = (agent_id == list(self.agents.keys())[0])
+                agent_model = agent.model or self.model
                 agent.task = asyncio.create_task(
                     run_autonomous_agent(
                         self.client, agent, self._workspace, self._plan_content,
-                        self.model, is_first=is_first,
+                        agent_model, is_first=is_first,
                         team_roster=getattr(self, '_team_roster', None),
                         team_size=getattr(self, '_team_size', None)
                     )
@@ -3510,7 +3525,7 @@ class AutonomousOrchestrator:
         expected_agents = list(self.agents.keys())
         stall_timeout = max_stall_minutes * 60
         last_shown_pos = 0
-        update_interval = 30  # Show update every 30 seconds
+        update_interval = 300 if QUIET_MODE else 30  # 5 min in quiet, 30s normal
         last_update_time = datetime.now()
         nudge_count = 0  # Track consecutive nudges
         max_nudges = 3  # Escalate to human after 3 nudges
@@ -3519,14 +3534,15 @@ class AutonomousOrchestrator:
         last_phase_check_pos = 0  # Track conversation position for phase detection
         decisions_mtime = workspace.decisions_file.stat().st_mtime if workspace.decisions_file.exists() else 0
         
-        console.print(Panel(
-            "Type a message to interject, Ctrl+C to abort",
-            title="📡 MONITORING", border_style="bright_blue"
-        ))
+        if not QUIET_MODE:
+            console.print(Panel(
+                "Type a message to interject, Ctrl+C to abort",
+                title="📡 MONITORING", border_style="bright_blue"
+            ))
         
         # Upfront expectation: show plan scope and verification info
         phase_info = self._parse_phase_progress(workspace)
-        if phase_info:
+        if phase_info and not QUIET_MODE:
             total_phases = phase_info.split('/')[-1].split(' ')[0] if '/' in phase_info else '?'
             verify_note = " | Expect 1-2 verification rounds" if total_rounds > 1 else ""
             round_note = f" | Round {round_number}/{total_rounds}" if total_rounds > 1 else ""
@@ -3552,6 +3568,20 @@ class AutonomousOrchestrator:
                 # Check for user input
                 user_input = await self.check_user_input()
                 if user_input:
+                    # In quiet mode, "status" triggers an on-demand status display
+                    if QUIET_MODE and user_input.strip().lower() == "status":
+                        status = read_all_satisfaction(workspace)
+                        status_icons = []
+                        for aid, ast in status.items():
+                            if "SATISFIED" in ast: status_icons.append(f"✅{aid[:3]}")
+                            elif "BLOCKED" in ast: status_icons.append(f"🔴{aid[:3]}")
+                            elif "WORKING" in ast: status_icons.append(f"🔧{aid[:3]}")
+                            else: status_icons.append(f"⏳{aid[:3]}")
+                        phase_ticker = self._build_phase_ticker(workspace)
+                        console.print(f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim] 📊 {' '.join(status_icons)}")
+                        if phase_ticker:
+                            console.print(f"  [dim]📋[/dim] {phase_ticker}")
+                        continue
                     # Inject user message
                     append_to_conversation(workspace, "HUMAN", f"""
 @AllAgents - Human says:
@@ -3563,7 +3593,8 @@ class AutonomousOrchestrator:
             
             # Check victory
             if check_all_satisfied(workspace, expected_agents):
-                log("🎉 All agents SATISFIED - Victory!", "OK")
+                # Victory always prints, even in quiet mode
+                console.print(f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim] ✅ [green]🎉 All agents SATISFIED - Victory![/green]")
                 await self.announce_victory(workspace, is_final=is_final_round)
                 self.metrics.victory = True
                 return True
@@ -3705,8 +3736,8 @@ Nudge {nudge_count}/{max_nudges} before human escalation.
                     console.print(f"  [dim]📋[/dim] {phase_ticker}")
                     last_phase_ticker = phase_ticker
                 
-                # Print recent conversation activity
-                if recent_messages:
+                # Print recent conversation activity (suppressed in quiet mode)
+                if recent_messages and not QUIET_MODE:
                     for msg_line in recent_messages:
                         console.print(f"  [dim]│[/dim] {msg_line}")
             
@@ -5092,6 +5123,37 @@ Satisfaction Criteria:
   • System starts successfully and health endpoints respond
 """
     },
+    "designer": {
+        "title": "Designer — UX/UI Design Expert",
+        "short": "User experience, interface design, accessibility, interaction patterns",
+        "detail": """
+Responsibilities:
+  • Reviews every phase for user experience impact
+  • Advocates for end users — challenges complexity, pushes for clarity
+  • Ensures error messages are actionable (what went wrong + what to do)
+  • Reviews CLI ergonomics — flag naming, output formatting, defaults
+  • Ensures consistency with existing UX patterns in the codebase
+
+Design Principles:
+  • Consistency over novelty — match existing patterns
+  • Progressive disclosure — minimum needed, detail on demand
+  • Errors are guidance — every error tells you what to do next
+  • Accessibility is non-negotiable — color is not the only channel
+  • Sensible defaults — zero-config should work
+
+CLI & Terminal UX:
+  • Output consumed in terminals with varying widths and color support
+  • Long-running operations need progress indicators or heartbeats
+  • Interactive prompts must be clear about expected input
+  • Quiet/verbose modes should offer meaningful signal-to-noise control
+
+Satisfaction Criteria:
+  • All phases reviewed for UX impact
+  • User-facing output consistent with codebase patterns
+  • Error messages actionable, help text accurate
+  • Accessibility considered, CLI ergonomics reviewed
+"""
+    },
     "dynamic": {
         "title": "Dynamic Personas — Task-Adaptive Team Assembly",
         "short": "Domain specialists generated to match non-code and mixed tasks",
@@ -5551,6 +5613,14 @@ Personas:
   behavioral depth. Use --static-personas to force the code team, or
   --domains to specify which domains need coverage.
 
+  Each persona can run on a different model (set 'model' in config.yaml).
+  Personas without a model key use the orchestrator default.
+
+Output Control:
+  --quiet suppresses routine logs and monitoring chatter. You still see the
+  interview, escalations, victory, and a heartbeat every 5 minutes. Type
+  "status" during monitoring for an on-demand progress snapshot.
+
 Workspace Isolation:
   If --out-path is inside a git repo, Mandali automatically creates a git worktree
   in a sibling directory so agents work in isolation. Your original directory is
@@ -5583,6 +5653,9 @@ Example: python mandali.py --describe dev
     parser.add_argument('--max-retries', type=int, default=5,
                         help='Max verification-relaunch cycles after victory (0 = no verification, default: 5)')
     parser.add_argument('--verbose', action='store_true', help='Verbose output')
+    parser.add_argument('--quiet', action='store_true', default=False,
+                        help='Suppress non-essential output. Shows only interview, escalations, '
+                             'victory, and periodic status heartbeat (every 5 min)')
     parser.add_argument('--debug', action='store_true', 
                         help='Log all LLM requests/responses to mandali-artifacts/debug.jsonl')
     parser.add_argument('--version', action='version', version=f'mandali {__version__}')
@@ -5599,6 +5672,11 @@ Example: python mandali.py --describe dev
                         help='One-time setup: provision Azure Bot + cloud relay for Teams integration')
     
     args = parser.parse_args()
+    
+    # Set global quiet mode
+    global QUIET_MODE
+    if args.quiet:
+        QUIET_MODE = True
     
     # Check for updates (non-blocking background thread)
     check_for_updates_async()

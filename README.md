@@ -65,6 +65,7 @@ Mandali checks for updates on each launch and notifies you when a newer version 
 | `--stall-timeout <min>` | No (default: 5) | Minutes of inactivity before human escalation |
 | `--max-retries <n>` | No (default: 5) | Verification rounds after agents complete. Set 0 to disable |
 | `--verbose` | No | Show detailed status updates |
+| `--quiet` | No | Suppress non-essential output. Shows interview, escalations, victory, and a status heartbeat every 5 min. Type `status` during monitoring for on-demand progress |
 | `--debug` | No | Log all LLM requests/responses for diagnostics |
 | `--static-personas` | No | Force the static code team, skip task classification |
 | `--domains <list>` | No | Comma-separated domain list (e.g., `analytics,writing`). Overrides classifier |
@@ -100,6 +101,8 @@ Mandali reads the task and assembles a team to match.
 **Non-code and mixed tasks** — research, analysis, writing, or anything spanning code and other domains — get a team of generated specialists. Each domain gets adversarial coverage: a Doer to produce the work, a Critic to challenge it, and a Scope-keeper when the task crosses multiple domains.
 
 Generated personas carry the same behavioral depth as the static team: engagement rules, conflict resolution, self-unblocking protocols. The collaboration model is the same regardless of team composition.
+
+**Per-persona models** — Each persona can run on a different model. Set the `model` key per persona in `config.yaml` to route cost-sensitive roles to lighter models while keeping critical roles on the strongest available. Personas without a `model` key fall back to the orchestrator default.
 
 ```bash
 # Force the static code team regardless of task type
