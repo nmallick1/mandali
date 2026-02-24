@@ -4,3 +4,5 @@ __pycache__/
 dist/
 build/
 DYNAMIC-PERSONAS.md
+personas/
+plans/
